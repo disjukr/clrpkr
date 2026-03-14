@@ -1,0 +1,13 @@
+{
+  "name": "clrpkr",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev:web": "pnpm --filter web dev",
+    "build:web": "pnpm --filter web build",
+    "preview:web": "pnpm --filter web preview"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  }
+}
