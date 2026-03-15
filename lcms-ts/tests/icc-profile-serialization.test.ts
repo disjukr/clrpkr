@@ -90,7 +90,12 @@ describe("ICC profile serialization", () => {
     const reparsed = parseIccProfile(serialized.bytes);
 
     expect(reparsed.header.tagCount).toBe(sourceRecords.length);
-    expect(reparsed.records).toEqual(sourceRecords);
+    expect(
+      reparsed.records.map((record) => ({
+        signature: record.signature,
+        value: record.value,
+      })),
+    ).toEqual(sourceRecords);
   });
 
   it("supports memory-backed profile tag read/write operations", () => {
@@ -155,6 +160,76 @@ describe("ICC profile serialization", () => {
     expect(cmsTagLinkedTo(reopened, "B2A0")).toBe("A2B0");
     expect(cmsReadTag(reopened, "B2A0")).toEqual(cmsReadTag(reopened, "A2B0"));
     expect(b2a0Range).toEqual(a2b0Range);
+  });
+
+  it("does not expose raw-written tags as cooked until reopen", () => {
+    const { data, header, tags } = loadProfile("color/sRGB_v4_ICC_preference.icc");
+    const wtpt = tags.find((entry) => entry.signature === "wtpt");
+    if (!wtpt) {
+      throw new Error("Missing wtpt");
+    }
+
+    const profile = cmsOpenProfileFromMem(
+      serializeIccProfile(
+        { ...header },
+        [serializeIccTagRecord("wtpt", parseIccTagValue(data, wtpt))],
+      ).bytes,
+    );
+    const rawWtpt = cmsReadRawTag(profile, "wtpt");
+    if (!rawWtpt) {
+      throw new Error("Missing raw wtpt");
+    }
+
+    const rawOnly = cmsWriteRawTag(profile, "wtpt", rawWtpt);
+
+    expect(cmsReadRawTag(rawOnly, "wtpt")).toEqual(rawWtpt);
+    expect(cmsReadTag(rawOnly, "wtpt")).toBeUndefined();
+    expect(cmsReadTag(cmsOpenProfileFromMem(cmsSaveProfileToMem(rawOnly)), "wtpt")).toEqual(cmsReadTag(profile, "wtpt"));
+  });
+
+  it("keeps linked tags following the target after a raw overwrite", () => {
+    const { data, header, tags } = loadProfile("color/sRGB_v4_ICC_preference.icc");
+    const selected = ["A2B0", "wtpt"] as const;
+    const profile = cmsOpenProfileFromMem(
+      serializeIccProfile(
+        { ...header },
+        selected.map((signature) => {
+          const tag = tags.find((entry) => entry.signature === signature);
+          if (!tag) {
+            throw new Error(`Missing tag ${signature}`);
+          }
+          return serializeIccTagRecord(signature, parseIccTagValue(data, tag));
+        }),
+      ).bytes,
+    );
+
+    const linked = cmsLinkTag(profile, "B2A0", "A2B0");
+    const a2b0Raw = cmsReadRawTag(linked, "A2B0");
+    if (!a2b0Raw) {
+      throw new Error("Missing raw A2B0");
+    }
+
+    const overwritten = cmsWriteRawTag(linked, "A2B0", a2b0Raw);
+
+    expect(cmsTagLinkedTo(overwritten, "B2A0")).toBe("A2B0");
+    expect(cmsReadRawTag(overwritten, "B2A0")).toEqual(a2b0Raw);
+    expect(cmsReadTag(overwritten, "B2A0")).toBeUndefined();
+  });
+
+  it("preserves unsupported raw tags across save and reopen", () => {
+    const { header } = loadProfile("color/sRGB_v4_ICC_preference.icc");
+    const unsupportedRaw = new Uint8Array([
+      0x75, 0x6e, 0x6b, 0x6e,
+      0x00, 0x00, 0x00, 0x00,
+      0x12, 0x34, 0x56, 0x78,
+    ]);
+
+    const profile = cmsWriteRawTag(cmsOpenProfileFromMem(serializeIccProfile({ ...header }, []).bytes), "meta", unsupportedRaw);
+    const reopened = cmsOpenProfileFromMem(cmsSaveProfileToMem(profile));
+
+    expect(cmsIsTag(reopened, "meta")).toBe(true);
+    expect(cmsReadRawTag(reopened, "meta")).toEqual(unsupportedRaw);
+    expect(cmsReadTag(reopened, "meta")).toBeUndefined();
   });
 
   it("writes serialized profile bytes to a generic stream", () => {
