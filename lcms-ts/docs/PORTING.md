@@ -2,111 +2,153 @@
 
 ## Goal
 
-Port the public Little CMS surface and the core implementation to TypeScript without losing the upstream file-level structure.
+Port the public Little CMS surface and core implementation to TypeScript while keeping upstream translation-unit boundaries visible in the repo.
 
 ## Current base
 
-- `src/port/upstream-manifest.ts` maps each upstream `src/*.c` translation unit to a planned TypeScript target.
-- `tmp/Little-CMS` is the in-repo upstream checkout used for API sync and source reference.
-- `scripts/sync-upstream-api.mjs` extracts public API declarations from upstream `include/lcms2.h`.
-- `src/color/conversions.ts` ports the current D50, `XYZ`, `xyY`, `Lab`, and `LCh` conversion helpers from `cmspcs.c` and `cmswtpnt.c`.
+- `src/port/upstream-manifest.ts` maps each upstream `src/*.c` file to a TypeScript target and tracking status.
+- `tmp/Little-CMS` is the checked-out upstream source used for API sync, source comparison, and differential oracle builds.
+- `scripts/sync-upstream-api.mjs` extracts the public API from upstream `include/lcms2.h`.
+- `src/color/conversions.ts` ports the current D50, `XYZ`, `xyY`, `Lab`, and `LCh` helpers from `cmspcs.c` and `cmswtpnt.c`.
 - `src/math/matrix.ts` ports the current 3x3 vector and matrix primitives from `cmsmtrx.c`.
-- `src/tone-curve/index.ts` ports the current tone-curve subset from `cmsgamma.c`, including tabulated curves, several parametric curve types, evaluation, monotonicity checks, reverse curves, and gamma estimation.
-- `src/profile/header.ts`, `src/profile/tag-table.ts`, `src/profile/tags.ts`, and `src/profile/lut.ts` parse ICC headers, tag tables, common tag payloads, and LUT tag structures used by the checked-in corpus.
-- `src/profile/io-base.ts` now centralizes low-level big-endian ICC reads/writes and the first header/tag-table serialization helpers.
-- `src/profile/io-tags.ts` now serializes the currently supported scalar and metadata tag payloads, including text/curve/LUT tags plus measurement, viewing, chromaticity, profile sequence, named color, dictionary, VCGT, video-signal, `MHC2`, UCR/BG, CRD info, screening, and array structures.
-- `src/profile/profile.ts` now assembles serialized headers, tag tables, and supported tag payloads into in-memory ICC profile bytes, plus a generic stream write helper and save-time profile ID recomputation.
-- `src/pipeline/index.ts` maps `mft1`, `mft2`, `mAB`, `mBA`, and `mpet` tags into an internal pipeline model and evaluates them in float mode with multilinear or tetrahedral interpolation, including structured parsing of `mAB`/`mBA` curve, matrix, and CLUT blocks plus named-color and Lab v2/v4 compatibility stages used by `cmsio1`.
-- `src/hash/md5.ts` now ports the MD5 path used for ICC profile ID computation.
-- `src/core/context.ts` defines the first context abstraction that can later absorb plugin and error handler state.
+- `src/tone-curve/index.ts` ports the current tone-curve subset from `cmsgamma.c`, including tabulated curves, parametric curves, evaluation, monotonicity checks, reverse curves, and gamma estimation.
+- `src/profile/header.ts`, `src/profile/tag-table.ts`, `src/profile/tags.ts`, `src/profile/io-base.ts`, `src/profile/io-tags.ts`, and `src/profile/profile.ts` now cover ICC header/tag-table parsing, broad `cmstypes` payload parsing and serialization, raw/cooked tag handling, linked tags, in-memory profile open/save, generic stream save, and save-time profile ID recomputation.
+- `src/profile/lut.ts` and `src/pipeline/index.ts` now cover `mft1`, `mft2`, `mAB`, `mBA`, and generic `mpet` parsing, serialization, pipeline construction, and float evaluation.
+- `src/hash/md5.ts` ports the MD5 path used for ICC profile IDs.
+- `src/core/context.ts` holds the first context abstraction for later plugin/error-state work.
 
-## Current status
+## Status summary
 
-- `cmsmtrx`, `cmspcs`, `cmswtpnt`, `cmsgamma`, and `cmslut` are `bootstrapped` rather than `planned`.
-- `cmsio0` is now effectively `done` for the current runtime-neutral scope: shared binary I/O primitives, raw/cooked tag handling, linked tags, ICC header/tag-table serialization, memory save/open, and generic stream save are in place.
-- `cmsio1` is now effectively `done` for the current scope: supported scalar/LUT tag serialization, intent-based LUT selection, devicelink lookup, float `DToB*` / `BToD*` tag selection, named-color pipeline selection, Lab v2/v4 compatibility stages, matrix-shaper fallbacks, and profile info lookup are in place.
-- `cmstypes` is now effectively `done` for the current scope:
-  - scalar/text types: `desc`, `text`, `mluc`, `XYZ `, `curv`, `para`, `sig `, `data`, `dtim`
-  - measurement/viewing types: `meas`, `view`, `chrm`
-  - table/sequence types: `clrt`, `clro`, `ncl2`, `pseq`, `psid`, `dict`, `vcgt`, `MHC2`
-  - print-oriented types: `bfd `, `crdi`, `scrn`, `cicp`
-  - generic array types: `sf32`, `uf32`, `ui08`, `ui32`, `ui64`
-  - upstream broken-type aliases for Corbis XYZ and Monaco curve payloads are accepted on parse
-- There is now a minimal profile-level serializer for the supported tag set, including memory and generic stream helpers, plus save-time MD5/profile ID regeneration.
-- ICC profile support is currently read-oriented:
-  - header parsing
-  - tag table parsing
-  - payload parsing for a growing `cmstypes` subset covering common scalar, sequence, and print-oriented tags
-  - LUT structure parsing for `mft1`, `mft2`, `mAB`, `mBA`
-- Pipeline execution is currently partial:
-  - float evaluation only
-  - stage kinds: tone curves, generic matrix, 8-bit CLUT, 16-bit CLUT, float CLUT, named-color, and Lab/XYZ normalization stages
-  - interpolation modes: multilinear and tetrahedral for 3-channel CLUTs, with Lab PCS LUT16 paths defaulting to multilinear like upstream `cmsio1`
-- Upstream oracle checks are available via `zig cc`:
-  - `oracle/pipeline_oracle.c`
-  - `scripts/build-pipeline-oracle.mjs`
-  - `scripts/run-pipeline-oracle-checks.mjs`
-- Current automated coverage includes:
-  - scalar color conversions
-  - matrix math
-  - tone-curve behavior
-  - ICC corpus header/tag-table validation
-  - ICC tag payload parsing
-  - LUT tag parsing
-  - pipeline construction and float evaluation
-  - direct numeric comparison against upstream Little CMS for selected `mft1`/`mft2` cases
+- `cmsio0.c`: done for the current runtime-neutral scope.
+- `cmsio1.c`: done for the current scope.
+- `cmstypes.c`: done for the current scope.
+- `cmslut.c`: done for the current scope.
+- `cmsmd5.c`: partially ported and sufficient for current ICC save/profile-ID behavior.
+- `cmsmtrx.c`, `cmspcs.c`, `cmswtpnt.c`, `cmsgamma.c`: bootstrapped and actively used by the ICC/profile pipeline path.
+- Transform-planning and execution modules are still largely unported:
+  - `cmscnvrt.c`
+  - `cmsopt.c`
+  - `cmspack.c`
+  - `cmsxform.c`
 
-## Major gaps
+## What is done now
 
-- Full ICC profile I/O is still missing:
-  - profile creation
-  - tag write-back
-  - full tag type coverage
-- `cmstypes` payload coverage is now broad enough to treat profile tag parsing/writing as `done` for the current scope; remaining richer `multiProcessElementType` plugin paths sit closer to `cmslut`/plugin extensibility than to common scalar tag handling.
-- Generic `mpet` handling now preserves unknown/vendor elements as raw payload blocks and can serialize structured `bACS`/`eACS`, matrix, and float CLUT elements without falling back to opaque bytes.
-- Transform creation and execution APIs are still missing:
-  - profile linking
-  - intent handling
-  - black point compensation
-  - proofing/devicelink behavior
-  - formatter pack/unpack
-- Interpolation support is still incomplete:
-  - current tetrahedral support is limited to 3-channel CLUT float evaluation
-  - higher-dimensional recursion and full upstream interpolation factory behavior are not yet separate modules
-- Advanced feature sets are still unported:
-  - CIECAM02
-  - CGATS
-  - named colors
-  - virtual profile constructors
-  - PostScript generators
-  - plugin registry and thread/state model
-  - gamut mapping helpers
-
-## Recommended order
-
-1. Finish ICC profile I/O first: `cmsio0`, `cmsio1`, `cmstypes`.
-2. Expand interpolation and pipeline execution: `cmsintrp`, `cmssamp`, remaining `cmslut`.
-3. Build transform planning/execution: `cmscnvrt`, `cmsopt`, `cmsxform`, `cmspack`.
-4. Add built-in profile constructors and utility subsystems: `cmsvirt`, `cmsmd5`, `cmshalf`, `cmsalpha`.
-5. Port advanced features last: `cmscam02`, `cmsplugin`, `cmsps2`, `cmscgats`, `cmsnamed`, `cmsgmt`, `cmssm`.
+- ICC binary I/O:
+  - header parsing and serialization
+  - tag table parsing and serialization
+  - big-endian scalar helpers
+  - date/time, fixed-point, signatures, profile IDs
+- Profile object and tag behavior:
+  - memory-backed profile open/save
+  - generic stream save
+  - raw tag read/write
+  - cooked tag read/write
+  - linked tags
+  - unsupported raw-tag preservation
+  - save-time MD5/profile ID recomputation
+- `cmstypes` coverage for the current scope:
+  - text/scalar: `desc`, `text`, `mluc`, `XYZ `, `curv`, `para`, `sig `, `data`, `dtim`
+  - measurement/viewing: `meas`, `view`, `chrm`
+  - sequence/table: `clrt`, `clro`, `ncl2`, `pseq`, `psid`, `dict`
+  - display/video/device extras: `vcgt`, `cicp`, `MHC2`
+  - print-oriented tags: `bfd `, `crdi`, `scrn`
+  - generic arrays: `sf32`, `uf32`, `ui08`, `ui32`, `ui64`
+  - upstream broken aliases: Corbis XYZ and Monaco curve payload compatibility
+- LUT and pipeline support:
+  - `mft1`, `mft2`, `mAB`, `mBA`, `mpet` parse/serialize
+  - generic `mpet` raw preservation for unknown/vendor elements
+  - float evaluation
+  - multilinear and tetrahedral interpolation
+  - named-color stages
+  - Lab/XYZ normalization and compatibility stages
+  - upstream-compatible `mAB`/`mBA` stage ordering
+- `cmsio1`-level selection helpers:
+  - intent-based input/output LUT selection
+  - devicelink LUT selection
+  - float `D2B*` / `B2D*` selection
+  - matrix-shaper fallback
+  - gray fallback
+  - profile info lookup
 
 ## Verification
 
-- Baseline TypeScript verification:
+- Baseline TypeScript checks:
   - `pnpm --filter lcms-ts typecheck`
   - `pnpm --filter lcms-ts test`
 - Upstream API extraction:
   - `pnpm --filter lcms-ts sync:api`
-- Upstream oracle build and comparison:
+- Upstream differential helpers:
   - `pnpm --filter lcms-ts oracle:build`
   - `pnpm --filter lcms-ts test:oracle`
-- The current oracle checks compare selected pipeline evaluations against upstream Little CMS built locally from `tmp/Little-CMS` with `zig cc`.
+- Current differential verification uses upstream Little CMS built locally from `tmp/Little-CMS` with `zig cc`.
+- Differential coverage now includes:
+  - parse results
+  - tag offset/size and link behavior
+  - LUT selection results
+  - save-then-reparse results
+  - `tmp/Little-CMS/testbed` sample profiles
+  - the bundled `icc-profiles` corpus
+
+## Practical meaning of current coverage
+
+- For the current runtime-neutral scope, `lcms-ts` is now close to upstream Little CMS for:
+  - opening ICC profiles from bytes
+  - inspecting headers and tags
+  - reading and writing supported tag payloads
+  - saving profiles back to bytes
+  - selecting upstream-like input/output/devicelink LUT pipelines
+- The major remaining gap is not profile I/O anymore. It is transform creation and execution.
+
+## Major gaps
+
+- Transform APIs are still missing:
+  - profile linking
+  - formatter pack/unpack
+  - optimized transform planning
+  - execution over packed pixel buffers
+  - proofing and BPC behavior at transform level
+- Interpolation is still embedded in the current pipeline module rather than split into upstream-like dedicated modules.
+- Plugin registry and extensibility are still missing:
+  - `cmsplugin`
+  - richer runtime plugin registration
+  - full generic MPE extensibility beyond safe preservation
+- Advanced utility subsystems remain unported:
+  - `cmscam02`
+  - `cmscgats`
+  - `cmsvirt`
+  - `cmsps2`
+  - `cmsnamed`
+  - `cmsgmt`
+  - `cmssm`
+
+## Recommended order
+
+1. Build transform execution foundations:
+   - `cmsintrp`
+   - `cmssamp`
+   - `cmspack`
+   - `cmsxform`
+2. Add transform planning and optimization:
+   - `cmscnvrt`
+   - `cmsopt`
+3. Port constructors and supporting utilities:
+   - `cmsvirt`
+   - `cmshalf`
+   - `cmsalpha`
+4. Port advanced and ecosystem-facing modules last:
+   - `cmsplugin`
+   - `cmscam02`
+   - `cmsps2`
+   - `cmscgats`
+   - `cmsnamed`
+   - `cmsgmt`
+   - `cmssm`
 
 ## Porting rules
 
 - Keep exported TypeScript names aligned to upstream `cms*` symbols where practical.
-- Separate pure math from ICC binary I/O; most performance work will depend on this split.
-- Replace C ownership rules with explicit immutable inputs and constructor/free pairs only where needed for API compatibility.
-- Prefer `Uint8Array`, `Uint16Array`, and `DataView` for binary profile operations instead of ad-hoc number arrays.
-- Treat the generated API list as the source of truth for public surface tracking.
+- Separate pure math from ICC binary I/O.
+- Replace C ownership rules with explicit immutable inputs and constructor/free pairs only where compatibility needs them.
+- Prefer `Uint8Array`, `Uint16Array`, `Float32Array`, and `DataView` for binary ICC work.
+- Treat the generated upstream API list as the source of truth for public-surface tracking.
 - Do not bake machine-local absolute paths into generated documentation.

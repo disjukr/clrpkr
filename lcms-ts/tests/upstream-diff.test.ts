@@ -1,3 +1,4 @@
+import { readdirSync } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -30,8 +31,30 @@ const helperPath = path.join(packageDir, "tmp", "oracle", "profile_diff_oracle.e
 const helperSource = path.join(packageDir, "oracle", "profile_diff_oracle.c");
 const buildScript = path.join(packageDir, "scripts", "build-profile-diff-oracle.mjs");
 const profileDir = path.join(packageDir, "tmp", "Little-CMS", "testbed");
+const repoRoot = path.resolve(packageDir, "..");
+const corpusDir = path.join(repoRoot, "icc-profiles");
 
 const profiles = ["ibm-t61.icc", "crayons.icc", "new.icc"] as const;
+
+function collectIccProfiles(directory: string): readonly string[] {
+  const entries = readdirSync(directory, { withFileTypes: true });
+  const files: string[] = [];
+
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...collectIccProfiles(fullPath));
+      continue;
+    }
+    if (path.extname(entry.name).toLowerCase() === ".icc") {
+      files.push(fullPath);
+    }
+  }
+
+  return files.sort((left, right) => left.localeCompare(right));
+}
+
+const corpusProfiles = collectIccProfiles(corpusDir);
 
 interface TagSummary {
   readonly signature: string;
@@ -152,9 +175,12 @@ function mapStageKind(stage: CmsPipelineStage): string {
     case "named-color":
       return "ncl ";
     case "lab-v2-to-v4":
-      return "2 4 ";
+      return "matf";
     case "lab-v4-to-v2":
-      return "4 2 ";
+      return "matf";
+    case "xyz-to-lab":
+    case "lab-to-xyz":
+      return "cvst";
     case "normalize-to-lab":
       return "l2d ";
     case "normalize-from-lab":
@@ -287,6 +313,16 @@ describe("upstream differential profile behavior", () => {
   for (const profileName of profiles) {
     it(`matches upstream for ${profileName}`, async () => {
       const profilePath = path.join(profileDir, profileName);
+      const [oracle, ts] = await Promise.all([getOracleSummary(profilePath), getTsSummary(profilePath)]);
+
+      expect(ts).toEqual(oracle);
+    });
+  }
+
+  for (const profilePath of corpusProfiles) {
+    const relativePath = path.relative(repoRoot, profilePath);
+
+    it(`matches upstream for corpus profile ${relativePath}`, async () => {
       const [oracle, ts] = await Promise.all([getOracleSummary(profilePath), getTsSummary(profilePath)]);
 
       expect(ts).toEqual(oracle);
