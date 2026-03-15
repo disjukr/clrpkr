@@ -157,7 +157,7 @@ describe("ICC profile serialization", () => {
     const a2b0Range = cmsGetTagOffsetAndSize(reopened, "A2B0");
     const b2a0Range = cmsGetTagOffsetAndSize(reopened, "B2A0");
 
-    expect(cmsTagLinkedTo(reopened, "B2A0")).toBe("A2B0");
+    expect(cmsTagLinkedTo(reopened, "B2A0")).toBeUndefined();
     expect(cmsReadTag(reopened, "B2A0")).toEqual(cmsReadTag(reopened, "A2B0"));
     expect(b2a0Range).toEqual(a2b0Range);
   });
