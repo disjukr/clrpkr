@@ -256,6 +256,14 @@ function writeFloat32(payload: Uint8Array, offset: number, value: number): void 
   new DataView(payload.buffer, payload.byteOffset, payload.byteLength).setFloat32(offset, value, false);
 }
 
+function makeRawMpeElement(payload: Uint8Array, elementOffset: number, elementSize: number): CmsGenericMpeRawElement {
+  return {
+    kind: "raw",
+    signature: readSignature(payload, elementOffset),
+    rawElement: payload.slice(elementOffset, elementOffset + elementSize),
+  };
+}
+
 function parseGenericMultiProcessElements(payload: Uint8Array): CmsGenericMultiProcessTagValue {
   const inputChannels = readU16(payload, 8);
   const outputChannels = readU16(payload, 10);
@@ -270,46 +278,58 @@ function parseGenericMultiProcessElements(payload: Uint8Array): CmsGenericMultiP
 
     switch (signature) {
       case "cvst": {
-        const elementInput = readU16(payload, bodyOffset);
-        const elementOutput = readU16(payload, bodyOffset + 2);
-        elements.push({
-          kind: "cvst",
-          inputChannels: elementInput,
-          outputChannels: elementOutput,
-          curves: parseCurveSet(payload, bodyOffset + 4 + elementInput * 8, elementInput),
-        });
+        try {
+          const elementInput = readU16(payload, bodyOffset);
+          const elementOutput = readU16(payload, bodyOffset + 2);
+          elements.push({
+            kind: "cvst",
+            inputChannels: elementInput,
+            outputChannels: elementOutput,
+            curves: parseCurveSet(payload, bodyOffset + 4 + elementInput * 8, elementInput),
+          });
+        } catch {
+          elements.push(makeRawMpeElement(payload, elementOffset, elementSize));
+        }
         break;
       }
       case "matf": {
-        const elementInput = readU16(payload, bodyOffset);
-        const elementOutput = readU16(payload, bodyOffset + 2);
-        const matrixCount = elementInput * elementOutput;
-        elements.push({
-          kind: "matf",
-          inputChannels: elementInput,
-          outputChannels: elementOutput,
-          matrix: Array.from({ length: matrixCount }, (_, matrixIndex) => readFloat32(payload, bodyOffset + 4 + matrixIndex * 4)),
-          offset: Array.from({ length: elementOutput }, (_, offsetIndex) => readFloat32(payload, bodyOffset + 4 + matrixCount * 4 + offsetIndex * 4)),
-        });
+        try {
+          const elementInput = readU16(payload, bodyOffset);
+          const elementOutput = readU16(payload, bodyOffset + 2);
+          const matrixCount = elementInput * elementOutput;
+          elements.push({
+            kind: "matf",
+            inputChannels: elementInput,
+            outputChannels: elementOutput,
+            matrix: Array.from({ length: matrixCount }, (_, matrixIndex) => readFloat32(payload, bodyOffset + 4 + matrixIndex * 4)),
+            offset: Array.from({ length: elementOutput }, (_, offsetIndex) => readFloat32(payload, bodyOffset + 4 + matrixCount * 4 + offsetIndex * 4)),
+          });
+        } catch {
+          elements.push(makeRawMpeElement(payload, elementOffset, elementSize));
+        }
         break;
       }
       case "clut": {
-        const elementInput = readU16(payload, bodyOffset);
-        const elementOutput = readU16(payload, bodyOffset + 2);
-        const gridPoints = Array.from({ length: elementInput }, (_, gridIndex) => readU8(payload, bodyOffset + 4 + gridIndex));
-        const pointCount = gridPoints.reduce((acc, value) => acc * value, 1);
-        const valueCount = pointCount * elementOutput;
-        const values = new Float32Array(valueCount);
-        for (let valueIndex = 0; valueIndex < valueCount; valueIndex += 1) {
-          values[valueIndex] = readFloat32(payload, bodyOffset + 20 + valueIndex * 4);
+        try {
+          const elementInput = readU16(payload, bodyOffset);
+          const elementOutput = readU16(payload, bodyOffset + 2);
+          const gridPoints = Array.from({ length: elementInput }, (_, gridIndex) => readU8(payload, bodyOffset + 4 + gridIndex));
+          const pointCount = gridPoints.reduce((acc, value) => acc * value, 1);
+          const valueCount = pointCount * elementOutput;
+          const values = new Float32Array(valueCount);
+          for (let valueIndex = 0; valueIndex < valueCount; valueIndex += 1) {
+            values[valueIndex] = readFloat32(payload, bodyOffset + 20 + valueIndex * 4);
+          }
+          elements.push({
+            kind: "clut",
+            inputChannels: elementInput,
+            outputChannels: elementOutput,
+            gridPoints,
+            values,
+          });
+        } catch {
+          elements.push(makeRawMpeElement(payload, elementOffset, elementSize));
         }
-        elements.push({
-          kind: "clut",
-          inputChannels: elementInput,
-          outputChannels: elementOutput,
-          gridPoints,
-          values,
-        });
         break;
       }
       case "bACS":
@@ -317,11 +337,7 @@ function parseGenericMultiProcessElements(payload: Uint8Array): CmsGenericMultiP
         elements.push({ kind: signature });
         break;
       default:
-        elements.push({
-          kind: "raw",
-          signature,
-          rawElement: payload.slice(elementOffset, elementOffset + elementSize),
-        });
+        elements.push(makeRawMpeElement(payload, elementOffset, elementSize));
     }
   }
 
