@@ -586,10 +586,14 @@ function parseEmbeddedTextTag(payload: Uint8Array, offset: number): { value: Cms
       };
     }
     case "text": {
-      // Embedded text is last field in current structures, so consume remaining bytes.
+      let size = payload.byteLength - offset;
+      const nextTypeOffset = findNextEmbeddedTextOffset(payload, offset + 8);
+      if (nextTypeOffset !== undefined) {
+        size = nextTypeOffset - offset;
+      }
       return {
-        value: parseTextTag(payload.slice(offset)),
-        nextOffset: payload.byteLength,
+        value: parseTextTag(payload.slice(offset, offset + size)),
+        nextOffset: offset + size,
       };
     }
     case "mluc": {
@@ -611,6 +615,17 @@ function parseEmbeddedTextTag(payload: Uint8Array, offset: number): { value: Cms
     default:
       throw new Error(`Unsupported embedded text type ${JSON.stringify(type)}`);
   }
+}
+
+function findNextEmbeddedTextOffset(payload: Uint8Array, start: number): number | undefined {
+  for (let offset = start; offset + 4 <= payload.byteLength; offset += 1) {
+    const type = readSignature(payload, offset);
+    if (type === "desc" || type === "text" || type === "mluc") {
+      return offset;
+    }
+  }
+
+  return undefined;
 }
 
 function parseProfileSequenceDescTag(payload: Uint8Array): CmsProfileSequenceDescTagValue {
