@@ -464,9 +464,11 @@ function parseMultiProcessElements(
   let mCurves: readonly CmsToneCurve[] | undefined;
   let clutValuesParsed: Uint8Array | Uint16Array | undefined;
   let aCurves: readonly CmsToneCurve[] | undefined;
+  const preClutCurveChannels = kind === "mAB" ? outputChannels : inputChannels;
+  const postClutCurveChannels = kind === "mAB" ? inputChannels : outputChannels;
 
   if (offsets.bCurves !== 0) {
-    bCurves = parseCurveSet(payload, offsets.bCurves, outputChannels);
+    bCurves = parseCurveSet(payload, offsets.bCurves, preClutCurveChannels);
   }
 
   if (offsets.matrix !== 0) {
@@ -476,7 +478,7 @@ function parseMultiProcessElements(
   }
 
   if (offsets.mCurves !== 0) {
-    mCurves = parseCurveSet(payload, offsets.mCurves, outputChannels);
+    mCurves = parseCurveSet(payload, offsets.mCurves, preClutCurveChannels);
   }
 
   if (offsets.clut !== 0) {
@@ -487,7 +489,7 @@ function parseMultiProcessElements(
   }
 
   if (offsets.aCurves !== 0) {
-    aCurves = parseCurveSet(payload, offsets.aCurves, inputChannels);
+    aCurves = parseCurveSet(payload, offsets.aCurves, postClutCurveChannels);
   }
 
   const base = {
