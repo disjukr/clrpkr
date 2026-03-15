@@ -421,4 +421,22 @@ describe("ICC tag serialization", () => {
 
     expect(reparseSerialized("pseq", pseq)).toEqual(pseq);
   });
+
+  it("does not split embedded text sequence records on raw text substrings", () => {
+    const pseq: CmsProfileSequenceDescTagValue = {
+      kind: "pseq",
+      entries: [
+        {
+          deviceMfg: "TEST",
+          deviceModel: "TEXT",
+          attributes: 0n,
+          technology: "CRT ",
+          manufacturer: { kind: "text", text: "Maker text marker with desc and mluc inside" },
+          model: { kind: "text", text: "Model tail" },
+        },
+      ],
+    };
+
+    expect(reparseSerialized("pseq", pseq)).toEqual(pseq);
+  });
 });

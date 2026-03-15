@@ -618,14 +618,68 @@ function parseEmbeddedTextTag(payload: Uint8Array, offset: number): { value: Cms
 }
 
 function findNextEmbeddedTextOffset(payload: Uint8Array, start: number): number | undefined {
+  let lastValidOffset: number | undefined;
   for (let offset = start; offset + 4 <= payload.byteLength; offset += 1) {
     const type = readSignature(payload, offset);
-    if (type === "desc" || type === "text" || type === "mluc") {
-      return offset;
+    if (!isEmbeddedTextBoundaryCandidate(payload, offset, type)) {
+      continue;
     }
+    lastValidOffset = offset;
   }
 
-  return undefined;
+  return lastValidOffset;
+}
+
+function isEmbeddedTextBoundaryCandidate(payload: Uint8Array, offset: number, type: string): boolean {
+  switch (type) {
+    case "desc":
+      return isValidDescBoundary(payload, offset);
+    case "mluc":
+      return isValidMlucBoundary(payload, offset);
+    case "text":
+      return offset + 8 <= payload.byteLength;
+    default:
+      return false;
+  }
+}
+
+function isValidDescBoundary(payload: Uint8Array, offset: number): boolean {
+  if (offset + 12 > payload.byteLength) {
+    return false;
+  }
+
+  const asciiLength = readU32(payload, offset + 8);
+  return offset + 12 + asciiLength <= payload.byteLength;
+}
+
+function isValidMlucBoundary(payload: Uint8Array, offset: number): boolean {
+  if (offset + 16 > payload.byteLength) {
+    return false;
+  }
+
+  const recordCount = readU32(payload, offset + 8);
+  const recordSize = readU32(payload, offset + 12);
+  if (recordSize < 12) {
+    return false;
+  }
+
+  const recordsEnd = offset + 16 + recordCount * recordSize;
+  if (recordsEnd > payload.byteLength) {
+    return false;
+  }
+
+  let size = 16 + recordCount * recordSize;
+  for (let index = 0; index < recordCount; index += 1) {
+    const recordOffset = offset + 16 + index * recordSize;
+    const length = readU32(payload, recordOffset + 4);
+    const textOffset = readU32(payload, recordOffset + 8);
+    if (offset + textOffset + length > payload.byteLength) {
+      return false;
+    }
+    size = Math.max(size, textOffset + length);
+  }
+
+  return offset + align4(size) <= payload.byteLength;
 }
 
 function parseProfileSequenceDescTag(payload: Uint8Array): CmsProfileSequenceDescTagValue {
