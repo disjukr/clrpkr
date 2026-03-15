@@ -22,6 +22,18 @@ export interface CmsSerializedIccProfile {
   readonly bytes: Uint8Array;
 }
 
+export const LCMS_USED_AS_INPUT = 0;
+export const LCMS_USED_AS_OUTPUT = 1;
+export const LCMS_USED_AS_PROOF = 2;
+
+export const INTENT_PERCEPTUAL = 0;
+export const INTENT_RELATIVE_COLORIMETRIC = 1;
+export const INTENT_SATURATION = 2;
+export const INTENT_ABSOLUTE_COLORIMETRIC = 3;
+
+const DEVICE_TO_PCS_16 = ["A2B0", "A2B1", "A2B2", "A2B1"] as const;
+const PCS_TO_DEVICE_16 = ["B2A0", "B2A1", "B2A2", "B2A1"] as const;
+
 let nextProfileId = 1;
 
 export function serializeIccProfile(
@@ -118,6 +130,22 @@ export function cmsGetTagCount(profile: CmsProfile): number {
   return profile.records.length;
 }
 
+export function cmsGetHeaderRenderingIntent(profile: CmsProfile): number {
+  return profile.header.renderingIntent;
+}
+
+export function cmsGetColorSpace(profile: CmsProfile): string {
+  return profile.header.colorSpace;
+}
+
+export function cmsGetPCS(profile: CmsProfile): string {
+  return profile.header.pcs;
+}
+
+export function cmsGetDeviceClass(profile: CmsProfile): string {
+  return profile.header.deviceClass;
+}
+
 export function cmsGetTagSignature(profile: CmsProfile, index: number): string | undefined {
   return profile.records[index]?.signature;
 }
@@ -176,6 +204,56 @@ export function cmsGetTagOffsetAndSize(
 export function cmsReadRawTag(profile: CmsProfile, signature: string): Uint8Array | undefined {
   const record = profile.records.find((entry) => entry.signature === signature);
   return record ? serializeProfileRecord(record).payload : undefined;
+}
+
+export function cmsIsMatrixShaper(profile: CmsProfile): boolean {
+  switch (profile.header.colorSpace) {
+    case "GRAY":
+      return cmsIsTag(profile, "kTRC");
+    case "RGB ":
+      return (
+        cmsIsTag(profile, "rXYZ") &&
+        cmsIsTag(profile, "gXYZ") &&
+        cmsIsTag(profile, "bXYZ") &&
+        cmsIsTag(profile, "rTRC") &&
+        cmsIsTag(profile, "gTRC") &&
+        cmsIsTag(profile, "bTRC")
+      );
+    default:
+      return false;
+  }
+}
+
+export function cmsIsCLUT(profile: CmsProfile, intent: number, usedDirection: number): boolean {
+  if (profile.header.deviceClass === "link") {
+    return profile.header.renderingIntent === intent;
+  }
+
+  switch (usedDirection) {
+    case LCMS_USED_AS_INPUT:
+      return intent >= 0 && intent <= INTENT_ABSOLUTE_COLORIMETRIC
+        ? cmsIsTag(profile, DEVICE_TO_PCS_16[intent]!)
+        : false;
+    case LCMS_USED_AS_OUTPUT:
+      return intent >= 0 && intent <= INTENT_ABSOLUTE_COLORIMETRIC
+        ? cmsIsTag(profile, PCS_TO_DEVICE_16[intent]!)
+        : false;
+    case LCMS_USED_AS_PROOF:
+      return (
+        cmsIsIntentSupported(profile, intent, LCMS_USED_AS_INPUT) &&
+        cmsIsIntentSupported(profile, INTENT_RELATIVE_COLORIMETRIC, LCMS_USED_AS_OUTPUT)
+      );
+    default:
+      return false;
+  }
+}
+
+export function cmsIsIntentSupported(profile: CmsProfile, intent: number, usedDirection: number): boolean {
+  if (cmsIsCLUT(profile, intent, usedDirection)) {
+    return true;
+  }
+
+  return cmsIsMatrixShaper(profile);
 }
 
 export function cmsWriteRawTag(profile: CmsProfile, signature: string, payload: Uint8Array): CmsProfile {
