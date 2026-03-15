@@ -220,6 +220,11 @@ describe("ICC tag serialization", () => {
       entries: [
         { name: "author", value: "lcms-ts" },
         {
+          name: "status",
+          value: "ok",
+          displayValue: { kind: "mluc", entries: [{ language: "en", country: "US", text: "Ready" }] },
+        },
+        {
           name: "description",
           value: "metadata",
           displayName: { kind: "mluc", entries: [{ language: "en", country: "US", text: "Description" }] },
@@ -397,5 +402,23 @@ describe("ICC tag serialization", () => {
       curve: cmsBuildTabulatedToneCurve16(3, [0, 32768, 65535]),
       entryCount: 3,
     });
+  });
+
+  it("round-trips embedded text sequence records that use text tags", () => {
+    const pseq: CmsProfileSequenceDescTagValue = {
+      kind: "pseq",
+      entries: [
+        {
+          deviceMfg: "TEST",
+          deviceModel: "TEXT",
+          attributes: 0n,
+          technology: "CRT ",
+          manufacturer: { kind: "text", text: "Maker" },
+          model: { kind: "text", text: "Model" },
+        },
+      ],
+    };
+
+    expect(reparseSerialized("pseq", pseq)).toEqual(pseq);
   });
 });

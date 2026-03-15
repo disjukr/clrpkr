@@ -422,8 +422,9 @@ function serializeScreeningTag(value: CmsScreeningTagValue): Uint8Array {
 function serializeDictionaryTag(value: CmsDictionaryTagValue): Uint8Array {
   const anyDisplayName = value.entries.some((entry) => entry.displayName);
   const anyDisplayValue = value.entries.some((entry) => entry.displayValue);
-  const recordLength = 16 + (anyDisplayName ? 8 : 0) + (anyDisplayValue ? 8 : 0);
-  const directorySize = value.entries.length * recordLength;
+  const hasDisplayNameSlot = anyDisplayName || anyDisplayValue;
+  const normalizedRecordLength = 16 + (hasDisplayNameSlot ? 8 : 0) + (anyDisplayValue ? 8 : 0);
+  const directorySize = value.entries.length * normalizedRecordLength;
   const variableChunks: Uint8Array[] = [];
   const buffer = new Uint8Array(16 + directorySize + value.entries.reduce((sum, entry) => {
     const nameBytes = encodeUtf16Be(entry.name);
@@ -449,7 +450,7 @@ function serializeDictionaryTag(value: CmsDictionaryTagValue): Uint8Array {
 
   writeSignature(buffer, 0, "dict");
   writeU32(buffer, 8, value.entries.length);
-  writeU32(buffer, 12, recordLength);
+  writeU32(buffer, 12, normalizedRecordLength);
 
   let recordOffset = 16;
   let dataOffset = 16 + directorySize;
@@ -470,7 +471,7 @@ function serializeDictionaryTag(value: CmsDictionaryTagValue): Uint8Array {
     writeU32(buffer, recordOffset + 12, valueChunk.size);
 
     let optionalOffset = recordOffset + 16;
-    if (anyDisplayName) {
+    if (hasDisplayNameSlot) {
       if (entry.displayName) {
         const chunk = writeChunk(serializeMlucTag(entry.displayName));
         writeU32(buffer, optionalOffset, chunk.offset);
@@ -484,7 +485,7 @@ function serializeDictionaryTag(value: CmsDictionaryTagValue): Uint8Array {
       writeU32(buffer, optionalOffset + 4, chunk.size);
     }
 
-    recordOffset += recordLength;
+    recordOffset += normalizedRecordLength;
   }
 
   return buffer;
