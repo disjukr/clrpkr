@@ -7,9 +7,11 @@ import {
   useEffect,
   useId,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
+  BackSide,
   ClampToEdgeWrapping,
   DataTexture,
   DoubleSide,
@@ -47,7 +49,27 @@ type SliceAxis = "x" | "y" | "z";
 
 type R3fDeps = {
   readonly Canvas: typeof import("@react-three/fiber").Canvas;
+  readonly Billboard: typeof import("@react-three/drei").Billboard;
   readonly OrbitControls: typeof import("@react-three/drei").OrbitControls;
+  readonly Text: typeof import("@react-three/drei").Text;
+  readonly useThree: typeof import("@react-three/fiber").useThree;
+};
+
+type CameraView = "iso" | "front" | "back" | "left" | "right" | "top" | "bottom";
+
+type CameraViewState = {
+  readonly name: CameraView;
+  readonly token: number;
+};
+
+type OrientationAngles = {
+  readonly pitch: number;
+  readonly yaw: number;
+};
+
+type OrientationDragState = {
+  readonly angles: OrientationAngles;
+  readonly token: number;
 };
 
 const SURFACE_POINT_LIMIT = 48_000;
@@ -90,6 +112,10 @@ function volumeIndex(
   z: number,
 ): number {
   return x + width * (y + height * z);
+}
+
+function mapLabToDisplay(l: number, a: number, b: number): [number, number, number] {
+  return [a, l, b];
 }
 
 function scalarToRgba(value: number, windowAbs: number): [number, number, number, number] {
@@ -138,35 +164,35 @@ function buildSliceTexture(
   if (axis === "z") {
     textureWidth = width;
     textureHeight = height;
-    physicalWidth = Math.max(spacing.xStep, Math.abs(spacing.xStep) * (width - 1));
-    physicalHeight = Math.max(spacing.yStep, Math.abs(spacing.yStep) * (height - 1));
-    position = [
+    physicalWidth = Math.max(spacing.yStep, Math.abs(spacing.yStep) * (height - 1));
+    physicalHeight = Math.max(spacing.xStep, Math.abs(spacing.xStep) * (width - 1));
+    position = mapLabToDisplay(
       origin.x + (width - 1) * spacing.xStep * 0.5,
       origin.y + (height - 1) * spacing.yStep * 0.5,
       origin.z + sliceIndex * spacing.zStep,
-    ];
+    );
   } else if (axis === "y") {
     textureWidth = width;
     textureHeight = depth;
-    physicalWidth = Math.max(spacing.xStep, Math.abs(spacing.xStep) * (width - 1));
-    physicalHeight = Math.max(spacing.zStep, Math.abs(spacing.zStep) * (depth - 1));
-    position = [
+    physicalWidth = Math.max(spacing.zStep, Math.abs(spacing.zStep) * (depth - 1));
+    physicalHeight = Math.max(spacing.xStep, Math.abs(spacing.xStep) * (width - 1));
+    position = mapLabToDisplay(
       origin.x + (width - 1) * spacing.xStep * 0.5,
       origin.y + sliceIndex * spacing.yStep,
       origin.z + (depth - 1) * spacing.zStep * 0.5,
-    ];
-    rotation = [Math.PI / 2, 0, 0];
+    );
+    rotation = [0, Math.PI / 2, 0];
   } else {
     textureWidth = height;
     textureHeight = depth;
     physicalWidth = Math.max(spacing.yStep, Math.abs(spacing.yStep) * (height - 1));
     physicalHeight = Math.max(spacing.zStep, Math.abs(spacing.zStep) * (depth - 1));
-    position = [
+    position = mapLabToDisplay(
       origin.x + sliceIndex * spacing.xStep,
       origin.y + (height - 1) * spacing.yStep * 0.5,
       origin.z + (depth - 1) * spacing.zStep * 0.5,
-    ];
-    rotation = [0, Math.PI / 2, 0];
+    );
+    rotation = [-Math.PI / 2, 0, 0];
   }
 
   const rgba = new Uint8Array(textureWidth * textureHeight * 4);
@@ -230,9 +256,11 @@ function buildSurfacePointCloud(
           continue;
         }
         points.push(
-          origin.x + x * spacing.xStep,
-          origin.y + y * spacing.yStep,
-          origin.z + z * spacing.zStep,
+          ...mapLabToDisplay(
+            origin.x + x * spacing.xStep,
+            origin.y + y * spacing.yStep,
+            origin.z + z * spacing.zStep,
+          ),
         );
 
         if (value < 0) {
@@ -283,15 +311,15 @@ function VolumeBounds(props: { readonly volume: NrrdVolume<Float32Array> }) {
   const sizeX = Math.abs(spacing.xStep) * Math.max(1, width - 1);
   const sizeY = Math.abs(spacing.yStep) * Math.max(1, height - 1);
   const sizeZ = Math.abs(spacing.zStep) * Math.max(1, depth - 1);
-  const center: [number, number, number] = [
+  const center = mapLabToDisplay(
     origin.x + (width - 1) * spacing.xStep * 0.5,
     origin.y + (height - 1) * spacing.yStep * 0.5,
     origin.z + (depth - 1) * spacing.zStep * 0.5,
-  ];
+  );
 
   return (
     <mesh position={center}>
-      <boxGeometry args={[sizeX, sizeY, sizeZ]} />
+      <boxGeometry args={[sizeY, sizeX, sizeZ]} />
       <meshBasicMaterial color="#1c1917" wireframe transparent opacity={0.16} />
     </mesh>
   );
@@ -319,6 +347,411 @@ function SurfacePoints(props: { readonly cloud: SurfacePointCloud }) {
   );
 }
 
+function getVolumeFrame(volume: NrrdVolume<Float32Array>) {
+  const {
+    metadata: {
+      dimensions: { width, height, depth },
+      spacing,
+      origin,
+    },
+  } = volume;
+
+  const sizeX = Math.abs(spacing.xStep) * Math.max(1, width - 1);
+  const sizeY = Math.abs(spacing.yStep) * Math.max(1, height - 1);
+  const sizeZ = Math.abs(spacing.zStep) * Math.max(1, depth - 1);
+  const center = mapLabToDisplay(
+    origin.x + (width - 1) * spacing.xStep * 0.5,
+    origin.y + (height - 1) * spacing.yStep * 0.5,
+    origin.z + (depth - 1) * spacing.zStep * 0.5,
+  );
+
+  return {
+    center,
+    maxSize: Math.max(sizeY, sizeX, sizeZ),
+  };
+}
+
+function getCameraPositionForView(
+  volume: NrrdVolume<Float32Array>,
+  view: CameraView,
+): [number, number, number] {
+  const { center, maxSize } = getVolumeFrame(volume);
+  const distance = Math.max(80, maxSize * 1.4);
+
+  switch (view) {
+    case "front":
+      return [center[0], center[1], center[2] + distance];
+    case "back":
+      return [center[0], center[1], center[2] - distance];
+    case "left":
+      return [center[0] - distance, center[1], center[2]];
+    case "right":
+      return [center[0] + distance, center[1], center[2]];
+    case "top":
+      return [center[0], center[1] + distance, center[2]];
+    case "bottom":
+      return [center[0], center[1] - distance, center[2]];
+    case "iso":
+    default:
+      return [
+        center[0] + distance * 0.9,
+        center[1] - distance * 1.1,
+        center[2] + distance * 0.85,
+      ];
+  }
+}
+
+function getCameraPositionForOrientation(
+  volume: NrrdVolume<Float32Array>,
+  orientation: OrientationAngles,
+): [number, number, number] {
+  const { center, maxSize } = getVolumeFrame(volume);
+  const distance = Math.max(80, maxSize * 1.4);
+  const pitch = (orientation.pitch * Math.PI) / 180;
+  const yaw = (orientation.yaw * Math.PI) / 180;
+
+  return [
+    center[0] + Math.sin(yaw) * Math.cos(pitch) * distance,
+    center[1] - Math.sin(pitch) * distance,
+    center[2] + Math.cos(yaw) * Math.cos(pitch) * distance,
+  ];
+}
+
+function computeOrientationAngles(
+  cameraPosition: readonly [number, number, number],
+  target: readonly [number, number, number],
+): OrientationAngles {
+  const dx = cameraPosition[0] - target[0];
+  const dy = cameraPosition[1] - target[1];
+  const dz = cameraPosition[2] - target[2];
+  const length = Math.hypot(dx, dy, dz) || 1;
+  const yaw = Math.atan2(dx, dz) * (180 / Math.PI);
+  const pitch = -Math.asin(dy / length) * (180 / Math.PI);
+  return { pitch, yaw };
+}
+
+function CameraViewController(props: {
+  readonly volume: NrrdVolume<Float32Array>;
+  readonly viewState: CameraViewState;
+  readonly dragState: OrientationDragState | null;
+  readonly controlsRef: React.MutableRefObject<{
+    readonly target: { set(x: number, y: number, z: number): void };
+    update(): void;
+  } | null>;
+  readonly onOrientationChange: (angles: OrientationAngles) => void;
+  readonly deps: R3fDeps;
+}) {
+  const { camera } = props.deps.useThree();
+
+  useEffect(() => {
+    const { center } = getVolumeFrame(props.volume);
+    const position =
+      props.dragState == null
+        ? getCameraPositionForView(props.volume, props.viewState.name)
+        : getCameraPositionForOrientation(props.volume, props.dragState.angles);
+
+    camera.position.set(position[0], position[1], position[2]);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(center[0], center[1], center[2]);
+
+    props.controlsRef.current?.target.set(center[0], center[1], center[2]);
+    props.controlsRef.current?.update();
+    props.onOrientationChange(computeOrientationAngles(position, center));
+  }, [
+    camera,
+    props.controlsRef,
+    props.dragState,
+    props.onOrientationChange,
+    props.viewState.name,
+    props.viewState.token,
+    props.volume,
+  ]);
+
+  return null;
+}
+
+function OrientationWidgetScene(props: {
+  readonly deps: R3fDeps;
+  readonly orientation: OrientationAngles;
+  readonly onSelectView: (view: CameraView) => void;
+  readonly onDragOrientation: (next: OrientationAngles) => void;
+}) {
+  const { Canvas, Text, useThree } = props.deps;
+  const radius = 7;
+  const dragRef = useRef<{
+    readonly pointerId: number;
+    readonly x: number;
+    readonly y: number;
+    readonly orientation: OrientationAngles;
+  } | null>(null);
+
+  function OrientationWidgetCamera() {
+    const { camera } = useThree();
+
+    useEffect(() => {
+      const pitch = (props.orientation.pitch * Math.PI) / 180;
+      const yaw = (props.orientation.yaw * Math.PI) / 180;
+      const cameraPosition: [number, number, number] = [
+        Math.sin(yaw) * Math.cos(pitch) * radius,
+        -Math.sin(pitch) * radius,
+        Math.cos(yaw) * Math.cos(pitch) * radius,
+      ];
+
+      camera.position.set(cameraPosition[0], cameraPosition[1], cameraPosition[2]);
+      camera.up.set(0, 1, 0);
+      camera.lookAt(0, 0, 0);
+      camera.updateProjectionMatrix();
+    }, [camera, props.orientation.pitch, props.orientation.yaw]);
+
+    return null;
+  }
+
+  return (
+    <Canvas camera={{ position: [0, 0, radius], fov: 28 }}>
+      <OrientationWidgetCamera />
+      <color attach="background" args={["#00000000"]} />
+      <ambientLight intensity={1.2} />
+      <group>
+        <mesh
+          onPointerDown={(event) => {
+            const pointerTarget = event.target as
+              | {
+                  setPointerCapture?(pointerId: number): void;
+                }
+              | null;
+            pointerTarget?.setPointerCapture?.(event.pointerId);
+            dragRef.current = {
+              pointerId: event.pointerId,
+              x: event.clientX,
+              y: event.clientY,
+              orientation: props.orientation,
+            };
+          }}
+          onPointerMove={(event) => {
+            const drag = dragRef.current;
+            if (!drag || drag.pointerId !== event.pointerId) {
+              return;
+            }
+            const next = {
+              yaw: drag.orientation.yaw - (event.clientX - drag.x) * 0.35,
+              pitch: Math.max(
+                -85,
+                Math.min(85, drag.orientation.pitch - (event.clientY - drag.y) * 0.35),
+              ),
+            };
+            props.onDragOrientation(next);
+          }}
+          onPointerUp={(event) => {
+            if (dragRef.current?.pointerId === event.pointerId) {
+              dragRef.current = null;
+            }
+            const pointerTarget = event.target as
+              | {
+                  releasePointerCapture?(pointerId: number): void;
+                }
+              | null;
+            pointerTarget?.releasePointerCapture?.(event.pointerId);
+          }}
+          onPointerOut={(event) => {
+            if (dragRef.current?.pointerId === event.pointerId) {
+              dragRef.current = null;
+            }
+            const pointerTarget = event.target as
+              | {
+                  releasePointerCapture?(pointerId: number): void;
+                }
+              | null;
+            pointerTarget?.releasePointerCapture?.(event.pointerId);
+          }}
+        >
+          <boxGeometry args={[8, 8, 8]} />
+          <meshBasicMaterial
+            transparent
+            opacity={0}
+            depthWrite={false}
+            side={BackSide}
+          />
+        </mesh>
+        {([
+          {
+            view: "front",
+            label: "Front",
+            position: [0, 0, 1.02],
+            rotation: [0, 0, 0],
+          },
+          {
+            view: "back",
+            label: "Back",
+            position: [0, 0, -1.02],
+            rotation: [0, Math.PI, 0],
+          },
+          {
+            view: "right",
+            label: "Right",
+            position: [1.02, 0, 0],
+            rotation: [0, Math.PI / 2, 0],
+          },
+          {
+            view: "left",
+            label: "Left",
+            position: [-1.02, 0, 0],
+            rotation: [0, -Math.PI / 2, 0],
+          },
+          {
+            view: "top",
+            label: "Top",
+            position: [0, 1.02, 0],
+            rotation: [-Math.PI / 2, 0, 0],
+          },
+          {
+            view: "bottom",
+            label: "Bottom",
+            position: [0, -1.02, 0],
+            rotation: [Math.PI / 2, 0, 0],
+          },
+        ] as const).map((face) => (
+          <group key={face.view} position={face.position} rotation={face.rotation}>
+            <mesh
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onSelectView(face.view);
+              }}
+            >
+              <planeGeometry args={[1.76, 1.76]} />
+              <meshBasicMaterial color="#fffdf8" transparent opacity={0.96} />
+            </mesh>
+            <Text
+              position={[0, 0, 0.02]}
+              color="#111827"
+              fontSize={0.24}
+              anchorX="center"
+              anchorY="middle"
+              outlineWidth={0.02}
+              outlineColor="#ffffff"
+            >
+              {face.label}
+            </Text>
+          </group>
+        ))}
+        <mesh>
+          <boxGeometry args={[1.72, 1.72, 1.72]} />
+          <meshBasicMaterial color="#111827" transparent opacity={0.08} wireframe />
+        </mesh>
+      </group>
+    </Canvas>
+  );
+}
+
+function LabAxes(props: {
+  readonly volume: NrrdVolume<Float32Array>;
+  readonly deps: R3fDeps;
+}) {
+  const { Billboard, Text } = props.deps;
+  const {
+    metadata: {
+      dimensions: { width, height, depth },
+      spacing,
+      origin,
+    },
+  } = props.volume;
+
+  const corner = mapLabToDisplay(origin.x - 12, origin.y - 12, origin.z - 12);
+  const xEnd = mapLabToDisplay(origin.x - 12, origin.y + (height - 1) * spacing.yStep + 18, origin.z - 12);
+  const xLabel: [number, number, number] = [xEnd[0] + 10, xEnd[1], xEnd[2]];
+  const yEnd = mapLabToDisplay(origin.x + (width - 1) * spacing.xStep + 18, origin.y - 12, origin.z - 12);
+  const yLabel: [number, number, number] = [yEnd[0], yEnd[1] + 10, yEnd[2]];
+  const zEnd = mapLabToDisplay(origin.x - 12, origin.y - 12, origin.z + (depth - 1) * spacing.zStep + 18);
+  const zLabel: [number, number, number] = [zEnd[0], zEnd[1], zEnd[2] + 10];
+
+  return (
+    <group>
+      <line>
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            args={[new Float32Array([...corner, ...xEnd]), 3]}
+            count={2}
+            itemSize={3}
+          />
+        </bufferGeometry>
+        <lineBasicMaterial color="#1c1917" transparent opacity={0.92} />
+      </line>
+      <line>
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            args={[new Float32Array([...corner, ...yEnd]), 3]}
+            count={2}
+            itemSize={3}
+          />
+        </bufferGeometry>
+        <lineBasicMaterial color="#1c1917" transparent opacity={0.92} />
+      </line>
+      <line>
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            args={[new Float32Array([...corner, ...zEnd]), 3]}
+            count={2}
+            itemSize={3}
+          />
+        </bufferGeometry>
+        <lineBasicMaterial color="#1c1917" transparent opacity={0.92} />
+      </line>
+
+      <mesh position={xEnd}>
+        <sphereGeometry args={[2.3, 12, 12]} />
+        <meshBasicMaterial color="#1c1917" />
+      </mesh>
+      <mesh position={yEnd}>
+        <sphereGeometry args={[2.3, 12, 12]} />
+        <meshBasicMaterial color="#1c1917" />
+      </mesh>
+      <mesh position={zEnd}>
+        <sphereGeometry args={[2.3, 12, 12]} />
+        <meshBasicMaterial color="#1c1917" />
+      </mesh>
+
+      <Billboard position={xLabel} follow lockX={false} lockY={false} lockZ={false}>
+        <Text
+          color="#111827"
+          fontSize={9}
+          anchorX="center"
+          anchorY="middle"
+          outlineWidth={0.75}
+          outlineColor="#ffffff"
+        >
+          a
+        </Text>
+      </Billboard>
+      <Billboard position={yLabel} follow lockX={false} lockY={false} lockZ={false}>
+        <Text
+          color="#111827"
+          fontSize={9}
+          anchorX="center"
+          anchorY="middle"
+          outlineWidth={0.75}
+          outlineColor="#ffffff"
+        >
+          L
+        </Text>
+      </Billboard>
+      <Billboard position={zLabel} follow lockX={false} lockY={false} lockZ={false}>
+        <Text
+          color="#111827"
+          fontSize={9}
+          anchorX="center"
+          anchorY="middle"
+          outlineWidth={0.75}
+          outlineColor="#ffffff"
+        >
+          b
+        </Text>
+      </Billboard>
+    </group>
+  );
+}
+
 function VolumeScene(props: {
   readonly volume: NrrdVolume<Float32Array>;
   readonly xSlice: number;
@@ -326,9 +759,16 @@ function VolumeScene(props: {
   readonly zSlice: number;
   readonly windowAbs: number;
   readonly isoThreshold: number;
+  readonly viewState: CameraViewState;
+  readonly dragState: OrientationDragState | null;
+  readonly onOrientationChange: (angles: OrientationAngles) => void;
   readonly deps: R3fDeps;
 }) {
   const { Canvas, OrbitControls } = props.deps;
+  const controlsRef = useRef<{
+    readonly target: { set(x: number, y: number, z: number): void };
+    update(): void;
+  } | null>(null);
   const cloud = useMemo(
     () => buildSurfacePointCloud(props.volume, props.isoThreshold),
     [props.isoThreshold, props.volume],
@@ -336,15 +776,44 @@ function VolumeScene(props: {
 
   return (
     <Canvas camera={{ position: [180, -280, 210], fov: 36 }}>
+      <CameraViewController
+        volume={props.volume}
+        viewState={props.viewState}
+        dragState={props.dragState}
+        controlsRef={controlsRef}
+        onOrientationChange={props.onOrientationChange}
+        deps={props.deps}
+      />
       <color attach="background" args={["#f4eee4"]} />
-      <group rotation={[-0.55, 0.22, 0.18]}>
+      <group>
         <VolumeBounds volume={props.volume} />
+        <LabAxes volume={props.volume} deps={props.deps} />
         <AxisSlice volume={props.volume} axis="x" sliceIndex={props.xSlice} windowAbs={props.windowAbs} />
         <AxisSlice volume={props.volume} axis="y" sliceIndex={props.ySlice} windowAbs={props.windowAbs} />
         <AxisSlice volume={props.volume} axis="z" sliceIndex={props.zSlice} windowAbs={props.windowAbs} />
         <SurfacePoints cloud={cloud} />
       </group>
-      <OrbitControls enableDamping makeDefault />
+      <OrbitControls
+        enableDamping
+        makeDefault
+        key={props.viewState.token}
+        onChange={(event) => {
+          const cameraObject = event?.target?.object;
+          const targetObject = event?.target?.target;
+          if (!cameraObject || !targetObject) {
+            return;
+          }
+          props.onOrientationChange(
+            computeOrientationAngles(
+              [cameraObject.position.x, cameraObject.position.y, cameraObject.position.z],
+              [targetObject.x, targetObject.y, targetObject.z],
+            ),
+          );
+        }}
+        ref={(instance) => {
+          controlsRef.current = instance as typeof controlsRef.current;
+        }}
+      />
     </Canvas>
   );
 }
@@ -384,18 +853,21 @@ export default function NrrdRoute() {
   const [xSlice, setXSlice] = useState(0);
   const [ySlice, setYSlice] = useState(0);
   const [zSlice, setZSlice] = useState(0);
+  const [viewState, setViewState] = useState<CameraViewState>({ name: "iso", token: 0 });
+  const [dragState, setDragState] = useState<OrientationDragState | null>(null);
+  const [orientation, setOrientation] = useState<OrientationAngles>({ pitch: -28, yaw: 34 });
   const [r3fDeps, setR3fDeps] = useState<R3fDeps | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadR3fDeps() {
-      const [{ Canvas }, { OrbitControls }] = await Promise.all([
+      const [{ Canvas, useThree }, { Billboard, OrbitControls, Text }] = await Promise.all([
         import("@react-three/fiber"),
         import("@react-three/drei"),
       ]);
       if (!cancelled) {
-        setR3fDeps({ Canvas, OrbitControls });
+        setR3fDeps({ Billboard, Canvas, OrbitControls, Text, useThree });
       }
     }
 
@@ -514,6 +986,13 @@ export default function NrrdRoute() {
   }
 
   const dims = volume?.volume.metadata.dimensions;
+  const selectView = (name: CameraView) => {
+    setDragState(null);
+    setViewState((current) => ({
+      name,
+      token: current.token + 1,
+    }));
+  };
 
   return (
     <>
@@ -631,15 +1110,44 @@ export default function NrrdRoute() {
                   </div>
                   <div className="h-[38rem]">
                     {r3fDeps ? (
-                      <VolumeScene
-                        volume={volume.volume}
-                        xSlice={xSlice}
-                        ySlice={ySlice}
-                        zSlice={zSlice}
-                        windowAbs={windowAbs}
-                        isoThreshold={isoThreshold}
-                        deps={r3fDeps}
-                      />
+                      <div className="relative h-full">
+                        <div className="absolute right-3 top-3 z-10 h-28 w-28 overflow-hidden rounded-[1rem] border border-black/10 bg-white/82 shadow-[0_12px_28px_rgba(70,48,22,0.12)] backdrop-blur">
+                          <OrientationWidgetScene
+                            deps={r3fDeps}
+                            orientation={orientation}
+                            onSelectView={selectView}
+                            onDragOrientation={(nextOrientation) => {
+                              setOrientation(nextOrientation);
+                              setDragState((current) => ({
+                                angles: nextOrientation,
+                                token: (current?.token ?? 0) + 1,
+                              }));
+                            }}
+                          />
+                          <button
+                            className="absolute right-2 top-2 rounded-full border border-black/12 bg-stone-900 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-white shadow-sm"
+                            type="button"
+                            onClick={() => {
+                              setDragState(null);
+                              selectView("iso");
+                            }}
+                          >
+                            Iso
+                          </button>
+                        </div>
+                        <VolumeScene
+                          volume={volume.volume}
+                          xSlice={xSlice}
+                          ySlice={ySlice}
+                          zSlice={zSlice}
+                          windowAbs={windowAbs}
+                          isoThreshold={isoThreshold}
+                          viewState={viewState}
+                          dragState={dragState}
+                          onOrientationChange={setOrientation}
+                          deps={r3fDeps}
+                        />
+                      </div>
                     ) : (
                       <div className="grid h-full place-items-center text-sm text-stone-500">
                         Loading 3D viewer...
