@@ -20,7 +20,7 @@ import {
 } from "../profile/lut.js";
 import type { CmsIccTagEntry } from "../profile/tag-table.js";
 import { cmsBuildParametricToneCurve, cmsReverseToneCurve, cmsBuildTabulatedToneCurve16, cmsEvalToneCurveFloat, type CmsToneCurve } from "../tone-curve/index.js";
-import type { CmsCurveTagValue, CmsParsedTagValue, CmsXyzTagValue } from "../profile/tags.js";
+import type { CmsCurveTagValue, CmsNamedColorTagValue, CmsParsedTagValue, CmsXyzTagValue } from "../profile/tags.js";
 
 export type CmsPipelineStage =
   | {
@@ -67,12 +67,24 @@ export type CmsPipelineStage =
     }
   | {
       readonly kind: "normalize-from-xyz";
+    }
+  | {
+      readonly kind: "lab-v2-to-v4";
+    }
+  | {
+      readonly kind: "lab-v4-to-v2";
+    }
+  | {
+      readonly kind: "named-color";
+      readonly output: "pcs" | "device";
+      readonly data: CmsNamedColorTagValue;
     };
 
 export interface CmsPipeline {
   readonly inputChannels: number;
   readonly outputChannels: number;
   readonly stages: readonly CmsPipelineStage[];
+  readonly preferredInterpolation?: "multilinear" | "tetrahedral";
 }
 
 export interface CmsPipelineEvalOptions {
@@ -466,7 +478,7 @@ function evaluateClutStageTetrahedral(
 }
 
 function evaluateNormalizationStage(
-  stage: Extract<CmsPipelineStage, { kind: "normalize-to-lab" | "normalize-from-lab" | "normalize-to-xyz" | "normalize-from-xyz" }>,
+  stage: Extract<CmsPipelineStage, { kind: "normalize-to-lab" | "normalize-from-lab" | "normalize-to-xyz" | "normalize-from-xyz" | "lab-v2-to-v4" | "lab-v4-to-v2" }>,
   input: readonly number[],
 ): number[] {
   switch (stage.kind) {
@@ -486,7 +498,33 @@ function evaluateNormalizationStage(
       return [(input[0] ?? 0), (input[1] ?? 0), (input[2] ?? 0)];
     case "normalize-from-xyz":
       return [(input[0] ?? 0), (input[1] ?? 0), (input[2] ?? 0)];
+    case "lab-v2-to-v4":
+      return [
+        clampUnit((input[0] ?? 0) * (65535 / 65280)),
+        clampUnit((input[1] ?? 0) * (65535 / 65280)),
+        clampUnit((input[2] ?? 0) * (65535 / 65280)),
+      ];
+    case "lab-v4-to-v2":
+      return [
+        clampUnit((input[0] ?? 0) * (65280 / 65535)),
+        clampUnit((input[1] ?? 0) * (65280 / 65535)),
+        clampUnit((input[2] ?? 0) * (65280 / 65535)),
+      ];
   }
+}
+
+function evaluateNamedColorStage(
+  stage: Extract<CmsPipelineStage, { kind: "named-color" }>,
+  input: readonly number[],
+): number[] {
+  const index = Math.max(0, Math.min(stage.data.entries.length - 1, Math.round(input[0] ?? 0)));
+  const entry = stage.data.entries[index];
+  if (!entry) {
+    return [];
+  }
+
+  const values = stage.output === "pcs" ? entry.pcs : entry.deviceCoords;
+  return Array.from(values, (value) => clampUnit(value / 65535));
 }
 
 export function cmsPipelineEvalFloat(
@@ -495,6 +533,10 @@ export function cmsPipelineEvalFloat(
   options: CmsPipelineEvalOptions = {},
 ): number[] {
   const interpolation = options.interpolation ?? "auto";
+  const resolvedInterpolation =
+    interpolation === "auto"
+      ? (pipeline.preferredInterpolation ?? "tetrahedral")
+      : interpolation;
   let current = [...input];
 
   for (const stage of pipeline.stages) {
@@ -508,13 +550,18 @@ export function cmsPipelineEvalFloat(
       case "clut8":
       case "clut16":
       case "clutf":
-        current = evaluateClutStage(stage, current, interpolation);
+        current = evaluateClutStage(stage, current, resolvedInterpolation);
         break;
       case "normalize-to-lab":
       case "normalize-from-lab":
       case "normalize-to-xyz":
       case "normalize-from-xyz":
+      case "lab-v2-to-v4":
+      case "lab-v4-to-v2":
         current = evaluateNormalizationStage(stage, current);
+        break;
+      case "named-color":
+        current = evaluateNamedColorStage(stage, current);
         break;
     }
   }
@@ -591,7 +638,71 @@ function buildFloatOutputPipeline(profile: CmsProfile, signature: string): CmsPi
   return pipeline;
 }
 
+function adjustInputLut16Pipeline(profile: CmsProfile, pipeline: CmsPipeline, tag: CmsLut16TagValue): CmsPipeline {
+  if (cmsGetPCS(profile) !== "Lab ") {
+    return pipeline;
+  }
+
+  let adjusted = pipeline;
+  if (cmsGetColorSpace(profile) === "Lab " && tag.inputChannels === 3) {
+    adjusted = prependNormalizationStages(adjusted, { kind: "lab-v4-to-v2" });
+  }
+
+  return appendNormalizationStages(adjusted, { kind: "lab-v2-to-v4" });
+}
+
+function adjustOutputLut16Pipeline(profile: CmsProfile, pipeline: CmsPipeline, tag: CmsLut16TagValue): CmsPipeline {
+  if (cmsGetPCS(profile) !== "Lab ") {
+    return pipeline;
+  }
+
+  let adjusted = prependNormalizationStages(pipeline, { kind: "lab-v4-to-v2" });
+  if (cmsGetColorSpace(profile) === "Lab " && tag.outputChannels === 3) {
+    adjusted = appendNormalizationStages(adjusted, { kind: "lab-v2-to-v4" });
+  }
+
+  return {
+    ...adjusted,
+    preferredInterpolation: "multilinear",
+  };
+}
+
+function adjustDevicelinkLut16Pipeline(profile: CmsProfile, pipeline: CmsPipeline, tag: CmsLut16TagValue): CmsPipeline {
+  let adjusted = pipeline;
+
+  if (cmsGetColorSpace(profile) === "Lab " && tag.inputChannels === 3) {
+    adjusted = prependNormalizationStages(adjusted, { kind: "lab-v4-to-v2" });
+  }
+  if (cmsGetPCS(profile) === "Lab " && tag.outputChannels === 3) {
+    adjusted = appendNormalizationStages(adjusted, { kind: "lab-v2-to-v4" });
+  }
+
+  return cmsGetPCS(profile) === "Lab "
+    ? {
+        ...adjusted,
+        preferredInterpolation: "multilinear",
+      }
+    : adjusted;
+}
+
 export function cmsReadInputLUT(profile: CmsProfile, intent: number): CmsPipeline | null {
+  if (cmsGetDeviceClass(profile) === "nmcl") {
+    const tag = cmsReadTag(profile, "ncl2");
+    if (!isNamedColorTag(tag)) {
+      return null;
+    }
+
+    return {
+      inputChannels: 0,
+      outputChannels: 3,
+      stages: [
+        { kind: "named-color", output: "pcs", data: tag },
+        { kind: "lab-v2-to-v4" },
+      ],
+      preferredInterpolation: "tetrahedral",
+    };
+  }
+
   if (intent <= INTENT_ABSOLUTE_COLORIMETRIC) {
     let floatSignature = DEVICE_TO_PCS_FLOAT[intent] ?? DEVICE_TO_PCS_FLOAT[INTENT_PERCEPTUAL];
     if (cmsIsTag(profile, floatSignature)) {
@@ -605,7 +716,8 @@ export function cmsReadInputLUT(profile: CmsProfile, intent: number): CmsPipelin
 
     const tag = cmsReadTag(profile, signature);
     if (tag && isLutTag(tag)) {
-      return buildPipelineFromParsedTag(tag);
+      const pipeline = buildPipelineFromParsedTag(tag);
+      return tag.kind === "mft2" ? adjustInputLut16Pipeline(profile, pipeline, tag) : pipeline;
     }
   }
 
@@ -630,7 +742,8 @@ export function cmsReadOutputLUT(profile: CmsProfile, intent: number): CmsPipeli
 
     const tag = cmsReadTag(profile, signature);
     if (tag && isLutTag(tag)) {
-      return buildPipelineFromParsedTag(tag);
+      const pipeline = buildPipelineFromParsedTag(tag);
+      return tag.kind === "mft2" ? adjustOutputLut16Pipeline(profile, pipeline, tag) : pipeline;
     }
   }
 
@@ -643,7 +756,28 @@ export function cmsReadOutputLUT(profile: CmsProfile, intent: number): CmsPipeli
 
 export function cmsReadDevicelinkLUT(profile: CmsProfile, intent: number): CmsPipeline | null {
   if (cmsGetDeviceClass(profile) !== "link" || intent > INTENT_ABSOLUTE_COLORIMETRIC) {
-    return null;
+    if (cmsGetDeviceClass(profile) !== "nmcl" || intent > INTENT_ABSOLUTE_COLORIMETRIC) {
+      return null;
+    }
+  }
+
+  if (cmsGetDeviceClass(profile) === "nmcl") {
+    const tag = cmsReadTag(profile, "ncl2");
+    if (!isNamedColorTag(tag)) {
+      return null;
+    }
+
+    const stages: CmsPipelineStage[] = [{ kind: "named-color", output: "device", data: tag }];
+    if (cmsGetColorSpace(profile) === "Lab ") {
+      stages.push({ kind: "lab-v2-to-v4" });
+    }
+
+    return {
+      inputChannels: 0,
+      outputChannels: cmsGetColorSpace(profile) === "Lab " ? 3 : (tag.entries[0]?.deviceCoords.length ?? 0),
+      stages,
+      preferredInterpolation: "tetrahedral",
+    };
   }
 
   let signature = DEVICE_TO_PCS_16[intent] ?? DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
@@ -651,16 +785,29 @@ export function cmsReadDevicelinkLUT(profile: CmsProfile, intent: number): CmsPi
   if (cmsIsTag(profile, floatSignature)) {
     return buildFloatInputPipeline(profile, floatSignature);
   }
+  const fallbackFloatSignature = DEVICE_TO_PCS_FLOAT[INTENT_PERCEPTUAL];
+  if (floatSignature !== fallbackFloatSignature && cmsIsTag(profile, fallbackFloatSignature)) {
+    return buildFloatInputPipeline(profile, fallbackFloatSignature);
+  }
   if (!cmsIsTag(profile, signature)) {
     signature = DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
   }
 
   const tag = cmsReadTag(profile, signature);
-  return tag && isLutTag(tag) ? buildPipelineFromParsedTag(tag) : null;
+  if (!tag || !isLutTag(tag)) {
+    return null;
+  }
+
+  const pipeline = buildPipelineFromParsedTag(tag);
+  return tag.kind === "mft2" ? adjustDevicelinkLut16Pipeline(profile, pipeline, tag) : pipeline;
 }
 
 function isLutTag(tag: CmsParsedTagValue): tag is CmsGenericMultiProcessTagValue | CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue {
   return tag.kind === "mft1" || tag.kind === "mft2" || tag.kind === "mAB" || tag.kind === "mBA" || tag.kind === "mpet";
+}
+
+function isNamedColorTag(tag: CmsParsedTagValue | undefined): tag is CmsNamedColorTagValue {
+  return tag?.kind === "ncl2";
 }
 
 function buildRgbInputMatrixShaper(profile: CmsProfile): CmsPipeline | null {

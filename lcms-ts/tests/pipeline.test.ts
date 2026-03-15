@@ -306,4 +306,174 @@ describe("pipeline mapping", () => {
     expect(output?.stages[0]?.kind).toBe("normalize-to-lab");
     expect(output?.stages.at(-1)?.kind).toBe("matrix");
   });
+
+  it("builds named-color input and devicelink pipelines", () => {
+    const header = parseIccHeader(readFileSync(path.join(repoRoot, "icc-profiles", "color", "sRGB_v4_ICC_preference.icc")));
+    const profile = cmsCreateProfilePlaceholder(
+      {
+        ...header,
+        deviceClass: "nmcl",
+        colorSpace: "Lab ",
+        pcs: "Lab ",
+      },
+      [
+        {
+          signature: "ncl2",
+          value: {
+            kind: "ncl2",
+            vendorFlag: 0,
+            prefix: "",
+            suffix: "",
+            entries: [
+              {
+                name: "Color 1",
+                pcs: [32768, 32768, 32768] as const,
+                deviceCoords: [32768, 16384, 8192] as const,
+              },
+            ],
+          },
+        },
+      ],
+    );
+
+    const input = cmsReadInputLUT(profile, 0);
+    const devicelink = cmsReadDevicelinkLUT(profile, 0);
+
+    expect(input?.stages.map((stage) => stage.kind)).toEqual(["named-color", "lab-v2-to-v4"]);
+    expect(devicelink?.stages.map((stage) => stage.kind)).toEqual(["named-color", "lab-v2-to-v4"]);
+  });
+
+  it("evaluates named-color stages by color index", () => {
+    const header = parseIccHeader(readFileSync(path.join(repoRoot, "icc-profiles", "color", "sRGB_v4_ICC_preference.icc")));
+    const profile = cmsCreateProfilePlaceholder(
+      {
+        ...header,
+        deviceClass: "nmcl",
+        colorSpace: "RGB ",
+        pcs: "Lab ",
+      },
+      [
+        {
+          signature: "ncl2",
+          value: {
+            kind: "ncl2",
+            vendorFlag: 0,
+            prefix: "",
+            suffix: "",
+            entries: [
+              {
+                name: "Color 1",
+                pcs: [65280, 32768, 16384] as const,
+                deviceCoords: [1000, 2000, 3000] as const,
+              },
+              {
+                name: "Color 2",
+                pcs: [1000, 2000, 3000] as const,
+                deviceCoords: [4000, 5000, 6000] as const,
+              },
+            ],
+          },
+        },
+      ],
+    );
+
+    const input = cmsReadInputLUT(profile, 0);
+    const devicelink = cmsReadDevicelinkLUT(profile, 0);
+
+    expect(cmsPipelineEvalFloat([0], input!)[0]).toBeCloseTo(1, 5);
+    expect(cmsPipelineEvalFloat([1], devicelink!)).toEqual([
+      4000 / 65535,
+      5000 / 65535,
+      6000 / 65535,
+    ]);
+  });
+
+  it("adds Lab v4/v2 compatibility stages around lut16 Lab pipelines", () => {
+    const fullPath = path.join(repoRoot, "icc-profiles", "eci/eciCMYK_v2.icc");
+    const data = readFileSync(fullPath);
+    const header = parseIccHeader(data);
+    const tags = parseIccTagTable(data, header);
+    const a2b0 = tags.find((entry) => entry.signature === "A2B0");
+    const b2a0 = tags.find((entry) => entry.signature === "B2A0");
+    if (!a2b0 || !b2a0) {
+      throw new Error("Missing lut16 tags");
+    }
+
+    const profile = cmsCreateProfilePlaceholder(
+      {
+        ...header,
+        colorSpace: "Lab ",
+        pcs: "Lab ",
+      },
+      [
+        { signature: "A2B0", value: parseIccTagValue(data, a2b0) },
+        { signature: "B2A0", value: parseIccTagValue(data, b2a0) },
+      ],
+    );
+
+    const input = cmsReadInputLUT(profile, 0);
+    const output = cmsReadOutputLUT(profile, 0);
+
+    expect(input?.stages.at(-1)?.kind).toBe("lab-v2-to-v4");
+    expect(output?.stages[0]?.kind).toBe("lab-v4-to-v2");
+    expect(output?.stages.at(-1)?.kind).not.toBe("lab-v2-to-v4");
+  });
+
+  it("falls back to perceptual float devicelink tags when requested intent is missing", () => {
+    const d2b0 = parseIccTagValue(createGenericMpePayload("D2B0"), {
+      signature: "D2B0",
+      offset: 0,
+      size: createGenericMpePayload("D2B0").byteLength,
+    });
+    const profile = cmsCreateProfilePlaceholder(
+      {
+        ...parseIccHeader(readFileSync(path.join(repoRoot, "icc-profiles", "color", "sRGB_v4_ICC_preference.icc"))),
+        deviceClass: "link",
+        colorSpace: "RGB ",
+        pcs: "Lab ",
+      },
+      [{ signature: "D2B0", value: d2b0 }],
+    );
+
+    const devicelink = cmsReadDevicelinkLUT(profile, 2);
+
+    expect(devicelink?.stages[0]?.kind).toBe("matrix");
+    expect(devicelink?.stages.at(-1)?.kind).toBe("normalize-from-lab");
+  });
+
+  it("uses multilinear interpolation by default for Lab PCS output lut16 pipelines", () => {
+    const pipeline = {
+      inputChannels: 3,
+      outputChannels: 1,
+      preferredInterpolation: "multilinear" as const,
+      stages: [
+        {
+          kind: "clut16" as const,
+          inputChannels: 3,
+          outputChannels: 1,
+          gridPoints: [2, 2, 2] as const,
+          values: new Uint16Array([
+            0,
+            0,
+            0,
+            0,
+            65535,
+            0,
+            0,
+            65535,
+          ]),
+        },
+      ],
+    };
+
+    const automatic = cmsPipelineEvalFloat([0.5, 0.5, 0.5], pipeline, {
+      interpolation: "auto",
+    });
+    const multilinear = cmsPipelineEvalFloat([0.5, 0.5, 0.5], pipeline, {
+      interpolation: "multilinear",
+    });
+
+    expect(automatic[0]).toBeCloseTo(multilinear[0]!, 6);
+    expect(automatic[0]).toBeCloseTo(0.25, 6);
+  });
 });
