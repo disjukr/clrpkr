@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  cmsCreateProfilePlaceholder,
   cmsGetTagOffsetAndSize,
   cmsGetTagCount,
   cmsIsTag,
@@ -230,6 +231,30 @@ describe("ICC profile serialization", () => {
     expect(cmsIsTag(reopened, "meta")).toBe(true);
     expect(cmsReadRawTag(reopened, "meta")).toEqual(unsupportedRaw);
     expect(cmsReadTag(reopened, "meta")).toBeUndefined();
+  });
+
+  it("keeps shared offsets for unsupported linked-compatible raw tags", () => {
+    const { header } = loadProfile("color/sRGB_v4_ICC_preference.icc");
+    const unsupportedRaw = new Uint8Array([
+      0x75, 0x6e, 0x6b, 0x6e,
+      0x00, 0x00, 0x00, 0x00,
+      0xde, 0xad, 0xbe, 0xef,
+    ]);
+
+    const profile = cmsCreateProfilePlaceholder({ ...header }, [
+      { signature: "rTRC", rawPayload: unsupportedRaw, rawOnly: true },
+      { signature: "gTRC", rawPayload: unsupportedRaw, rawOnly: true, linkedTo: "rTRC" },
+    ]);
+    const reopened = cmsOpenProfileFromMem(cmsSaveProfileToMem(profile));
+    const rTrcRange = cmsGetTagOffsetAndSize(reopened, "rTRC");
+    const gTrcRange = cmsGetTagOffsetAndSize(reopened, "gTRC");
+
+    expect(cmsTagLinkedTo(reopened, "gTRC")).toBe("rTRC");
+    expect(cmsReadTag(reopened, "rTRC")).toBeUndefined();
+    expect(cmsReadTag(reopened, "gTRC")).toBeUndefined();
+    expect(cmsReadRawTag(reopened, "rTRC")).toEqual(unsupportedRaw);
+    expect(cmsReadRawTag(reopened, "gTRC")).toEqual(unsupportedRaw);
+    expect(gTrcRange).toEqual(rTrcRange);
   });
 
   it("writes serialized profile bytes to a generic stream", () => {
