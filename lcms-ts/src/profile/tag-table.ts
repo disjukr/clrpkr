@@ -1,4 +1,5 @@
 import type { CmsIccHeader } from "./header.js";
+import { readSignature, readU32, writeSignature, writeU32 } from "./io-base.js";
 
 export interface CmsIccTagEntry {
   readonly signature: string;
@@ -16,25 +17,33 @@ const DEVICELINK_REQUIRED_TAGS = ["desc", "cprt", "A2B0"];
 
 export function parseIccTagTable(data: Uint8Array, header?: CmsIccHeader): readonly CmsIccTagEntry[] {
   const resolvedHeader = header ?? null;
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const tagCount = resolvedHeader ? resolvedHeader.tagCount : view.getUint32(128, false);
+  const tagCount = resolvedHeader ? resolvedHeader.tagCount : readU32(data, 128);
   const entries: CmsIccTagEntry[] = [];
 
   for (let index = 0; index < tagCount; index += 1) {
     const offset = 132 + index * 12;
     entries.push({
-      signature: String.fromCharCode(
-        view.getUint8(offset),
-        view.getUint8(offset + 1),
-        view.getUint8(offset + 2),
-        view.getUint8(offset + 3),
-      ),
-      offset: view.getUint32(offset + 4, false),
-      size: view.getUint32(offset + 8, false),
+      signature: readSignature(data, offset),
+      offset: readU32(data, offset + 4),
+      size: readU32(data, offset + 8),
     });
   }
 
   return entries;
+}
+
+export function serializeIccTagTable(tags: readonly CmsIccTagEntry[]): Uint8Array {
+  const data = new Uint8Array(tags.length * 12);
+
+  for (let index = 0; index < tags.length; index += 1) {
+    const entryOffset = index * 12;
+    const tag = tags[index]!;
+    writeSignature(data, entryOffset, tag.signature);
+    writeU32(data, entryOffset + 4, tag.offset);
+    writeU32(data, entryOffset + 8, tag.size);
+  }
+
+  return data;
 }
 
 export function validateIccTagTable(

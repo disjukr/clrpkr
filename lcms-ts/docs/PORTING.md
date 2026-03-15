@@ -13,12 +13,16 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
 - `src/math/matrix.ts` ports the current 3x3 vector and matrix primitives from `cmsmtrx.c`.
 - `src/tone-curve/index.ts` ports the current tone-curve subset from `cmsgamma.c`, including tabulated curves, several parametric curve types, evaluation, monotonicity checks, reverse curves, and gamma estimation.
 - `src/profile/header.ts`, `src/profile/tag-table.ts`, `src/profile/tags.ts`, and `src/profile/lut.ts` parse ICC headers, tag tables, common tag payloads, and LUT tag structures used by the checked-in corpus.
+- `src/profile/io-base.ts` now centralizes low-level big-endian ICC reads/writes and the first header/tag-table serialization helpers.
+- `src/profile/io-tags.ts` now serializes the currently supported scalar tag payloads (`desc`, `text`, `mluc`, `XYZ `, `curv`, `para`) for write-back experiments.
 - `src/pipeline/index.ts` maps `mft1`, `mft2`, `mAB`, and `mBA` tags into an internal pipeline model and evaluates them in float mode with multilinear or tetrahedral interpolation.
 - `src/core/context.ts` defines the first context abstraction that can later absorb plugin and error handler state.
 
 ## Current status
 
 - `cmsmtrx`, `cmspcs`, `cmswtpnt`, `cmsgamma`, and `cmslut` are `bootstrapped` rather than `planned`.
+- `cmsio0` is now `in-progress` with shared binary I/O primitives plus initial serialization support for ICC headers and tag tables.
+- `cmsio1` is now `in-progress` with initial serialization support for the currently parsed non-LUT tag payloads.
 - ICC profile support is currently read-oriented:
   - header parsing
   - tag table parsing

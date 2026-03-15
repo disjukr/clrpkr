@@ -1,4 +1,14 @@
 import type { CmsIccTagEntry } from "./tag-table.js";
+import {
+  readS15Fixed16,
+  readSignature,
+  readU16,
+  readU32,
+  sliceIccRange,
+  writeS15Fixed16,
+  writeSignature,
+  writeU16,
+} from "./io-base.js";
 
 export interface CmsLut16TagValue {
   readonly kind: "mft2";
@@ -46,29 +56,8 @@ export interface CmsMultiProcessElementTagValue {
 
 export type CmsParsedLutTagValue = CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue;
 
-function readSignature(data: Uint8Array, offset: number): string {
-  return String.fromCharCode(
-    data[offset]!,
-    data[offset + 1]!,
-    data[offset + 2]!,
-    data[offset + 3]!,
-  );
-}
-
 function readU8(data: Uint8Array, offset: number): number {
   return data[offset]!;
-}
-
-function readU16(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(offset, false);
-}
-
-function readU32(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(offset, false);
-}
-
-function readS15Fixed16(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getInt32(offset, false) / 65536;
 }
 
 function integerPow(base: number, exponent: number): number {
@@ -80,7 +69,7 @@ function integerPow(base: number, exponent: number): number {
 }
 
 export function parseIccLutTag(data: Uint8Array, tag: CmsIccTagEntry): CmsParsedLutTagValue {
-  const payload = data.slice(tag.offset, tag.offset + tag.size);
+  const payload = sliceIccRange(data, tag.offset, tag.size, `LUT tag ${tag.signature}`);
   const type = readSignature(payload, 0);
 
   switch (type) {
@@ -163,9 +152,9 @@ function parseLut8(payload: Uint8Array): CmsLut8TagValue {
     outputChannels,
     gridPoints,
     matrix,
-    inputTables: payload.slice(inputTablesOffset, inputTablesOffset + inputTableValues),
-    clutValues: payload.slice(clutOffset, clutOffset + clutValuesCount),
-    outputTables: payload.slice(outputTablesOffset, outputTablesOffset + outputChannels * 256),
+    inputTables: new Uint8Array(payload.slice(inputTablesOffset, inputTablesOffset + inputTableValues)),
+    clutValues: new Uint8Array(payload.slice(clutOffset, clutOffset + clutValuesCount)),
+    outputTables: new Uint8Array(payload.slice(outputTablesOffset, outputTablesOffset + outputChannels * 256)),
   };
 }
 
@@ -260,4 +249,69 @@ export function validateLutTagStructure(
   }
 
   return issues;
+}
+
+export function serializeIccLutTag(value: CmsLut16TagValue | CmsLut8TagValue): Uint8Array {
+  switch (value.kind) {
+    case "mft1":
+      return serializeLut8(value);
+    case "mft2":
+      return serializeLut16(value);
+  }
+}
+
+function serializeLut16(value: CmsLut16TagValue): Uint8Array {
+  const inputTableValues = value.inputChannels * value.inputTableEntries;
+  const clutValuesCount = integerPow(value.gridPoints, value.inputChannels) * value.outputChannels;
+  const outputTableValues = value.outputChannels * value.outputTableEntries;
+  const payload = new Uint8Array(52 + inputTableValues * 2 + clutValuesCount * 2 + outputTableValues * 2);
+
+  writeSignature(payload, 0, "mft2");
+  payload[8] = value.inputChannels & 0xff;
+  payload[9] = value.outputChannels & 0xff;
+  payload[10] = value.gridPoints & 0xff;
+
+  for (let index = 0; index < 9; index += 1) {
+    writeS15Fixed16(payload, 12 + index * 4, value.matrix[index] ?? 0);
+  }
+
+  writeU16(payload, 48, value.inputTableEntries);
+  writeU16(payload, 50, value.outputTableEntries);
+
+  let offset = 52;
+  for (let index = 0; index < inputTableValues; index += 1) {
+    writeU16(payload, offset + index * 2, value.inputTables[index] ?? 0);
+  }
+  offset += inputTableValues * 2;
+  for (let index = 0; index < clutValuesCount; index += 1) {
+    writeU16(payload, offset + index * 2, value.clutValues[index] ?? 0);
+  }
+  offset += clutValuesCount * 2;
+  for (let index = 0; index < outputTableValues; index += 1) {
+    writeU16(payload, offset + index * 2, value.outputTables[index] ?? 0);
+  }
+
+  return payload;
+}
+
+function serializeLut8(value: CmsLut8TagValue): Uint8Array {
+  const inputTableValues = value.inputChannels * 256;
+  const clutValuesCount = integerPow(value.gridPoints, value.inputChannels) * value.outputChannels;
+  const outputTableValues = value.outputChannels * 256;
+  const payload = new Uint8Array(48 + inputTableValues + clutValuesCount + outputTableValues);
+
+  writeSignature(payload, 0, "mft1");
+  payload[8] = value.inputChannels & 0xff;
+  payload[9] = value.outputChannels & 0xff;
+  payload[10] = value.gridPoints & 0xff;
+
+  for (let index = 0; index < 9; index += 1) {
+    writeS15Fixed16(payload, 12 + index * 4, value.matrix[index] ?? 0);
+  }
+
+  payload.set(value.inputTables, 48);
+  payload.set(value.clutValues, 48 + inputTableValues);
+  payload.set(value.outputTables, 48 + inputTableValues + clutValuesCount);
+
+  return payload;
 }

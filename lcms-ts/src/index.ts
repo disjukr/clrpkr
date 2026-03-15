@@ -6,6 +6,8 @@ export * from "./color/conversions.js";
 export * from "./math/matrix.js";
 export * from "./pipeline/index.js";
 export * from "./profile/header.js";
+export * from "./profile/io-base.js";
+export * from "./profile/io-tags.js";
 export * from "./profile/lut.js";
 export * from "./profile/tag-table.js";
 export * from "./profile/tags.js";
