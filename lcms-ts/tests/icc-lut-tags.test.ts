@@ -173,4 +173,50 @@ describe("ICC LUT tag parsing", () => {
     expect(parsed.elements[0].rawElement).toEqual(rawElement);
     expect(serializeIccLutTag(parsed)).toEqual(payload);
   });
+
+  it("falls back to raw for generic mpet curve-set extensions it cannot decode", () => {
+    const curveData = new Uint8Array(36);
+    curveData[0] = "c".charCodeAt(0);
+    curveData[1] = "u".charCodeAt(0);
+    curveData[2] = "r".charCodeAt(0);
+    curveData[3] = "f".charCodeAt(0);
+    curveData[11] = 1;
+    curveData[12] = "p".charCodeAt(0);
+    curveData[13] = "a".charCodeAt(0);
+    curveData[14] = "r".charCodeAt(0);
+    curveData[15] = "f".charCodeAt(0);
+
+    const element = new Uint8Array(20 + curveData.byteLength);
+    element[0] = "c".charCodeAt(0);
+    element[1] = "v".charCodeAt(0);
+    element[2] = "s".charCodeAt(0);
+    element[3] = "t".charCodeAt(0);
+    element[9] = 1;
+    element[11] = 1;
+    element[15] = 20;
+    element[19] = curveData.byteLength;
+    element.set(curveData, 20);
+
+    const payload = new Uint8Array(16 + 8 + element.byteLength);
+    payload[0] = "m".charCodeAt(0);
+    payload[1] = "p".charCodeAt(0);
+    payload[2] = "e".charCodeAt(0);
+    payload[3] = "t".charCodeAt(0);
+    payload[9] = 1;
+    payload[11] = 1;
+    payload[15] = 1;
+    payload[19] = 24;
+    payload[23] = element.byteLength;
+    payload.set(element, 24);
+
+    const parsed = parseIccLutTag(payload, { signature: "D2B0", offset: 0, size: payload.byteLength }) as CmsGenericMultiProcessTagValue;
+    expect(parsed.elements).toHaveLength(1);
+    expect(parsed.elements[0]?.kind).toBe("raw");
+    if (parsed.elements[0]?.kind !== "raw") {
+      throw new Error("Expected raw element");
+    }
+    expect(parsed.elements[0].signature).toBe("cvst");
+    expect(parsed.elements[0].rawElement).toEqual(element);
+    expect(serializeIccLutTag(parsed)).toEqual(payload);
+  });
 });
