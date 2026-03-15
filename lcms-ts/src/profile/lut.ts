@@ -62,7 +62,52 @@ export interface CmsMultiProcessElementTagValue {
   readonly aCurves?: readonly CmsToneCurve[];
 }
 
-export type CmsParsedLutTagValue = CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue;
+export interface CmsGenericMpeCurveSetElement {
+  readonly kind: "cvst";
+  readonly inputChannels: number;
+  readonly outputChannels: number;
+  readonly curves: readonly CmsToneCurve[];
+}
+
+export interface CmsGenericMpeMatrixElement {
+  readonly kind: "matf";
+  readonly inputChannels: number;
+  readonly outputChannels: number;
+  readonly matrix: readonly number[];
+  readonly offset: readonly number[];
+}
+
+export interface CmsGenericMpeClutElement {
+  readonly kind: "clut";
+  readonly inputChannels: number;
+  readonly outputChannels: number;
+  readonly gridPoints: readonly number[];
+  readonly values: Float32Array;
+}
+
+export interface CmsGenericMpePassthroughElement {
+  readonly kind: "bACS" | "eACS";
+}
+
+export type CmsGenericMpeElement =
+  | CmsGenericMpeClutElement
+  | CmsGenericMpeCurveSetElement
+  | CmsGenericMpeMatrixElement
+  | CmsGenericMpePassthroughElement;
+
+export interface CmsGenericMultiProcessTagValue {
+  readonly kind: "mpet";
+  readonly inputChannels: number;
+  readonly outputChannels: number;
+  readonly rawPayload: Uint8Array;
+  readonly elements: readonly CmsGenericMpeElement[];
+}
+
+export type CmsParsedLutTagValue =
+  | CmsGenericMultiProcessTagValue
+  | CmsLut16TagValue
+  | CmsLut8TagValue
+  | CmsMultiProcessElementTagValue;
 
 function readU8(data: Uint8Array, offset: number): number {
   return data[offset]!;
@@ -195,6 +240,83 @@ function parseClutBlock(
   throw new Error(`Unsupported mAB/mBA CLUT precision: ${precision}`);
 }
 
+function readFloat32(payload: Uint8Array, offset: number): number {
+  return new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getFloat32(offset, false);
+}
+
+function parseGenericMultiProcessElements(payload: Uint8Array): CmsGenericMultiProcessTagValue {
+  const inputChannels = readU16(payload, 8);
+  const outputChannels = readU16(payload, 10);
+  const elementCount = readU32(payload, 12);
+  const elements: CmsGenericMpeElement[] = [];
+
+  for (let index = 0; index < elementCount; index += 1) {
+    const elementOffset = readU32(payload, 16 + index * 8);
+    const signature = readSignature(payload, elementOffset);
+    const bodyOffset = elementOffset + 8;
+
+    switch (signature) {
+      case "cvst": {
+        const elementInput = readU16(payload, bodyOffset);
+        const elementOutput = readU16(payload, bodyOffset + 2);
+        elements.push({
+          kind: "cvst",
+          inputChannels: elementInput,
+          outputChannels: elementOutput,
+          curves: parseCurveSet(payload, bodyOffset + 4 + elementInput * 8, elementInput),
+        });
+        break;
+      }
+      case "matf": {
+        const elementInput = readU16(payload, bodyOffset);
+        const elementOutput = readU16(payload, bodyOffset + 2);
+        const matrixCount = elementInput * elementOutput;
+        elements.push({
+          kind: "matf",
+          inputChannels: elementInput,
+          outputChannels: elementOutput,
+          matrix: Array.from({ length: matrixCount }, (_, matrixIndex) => readFloat32(payload, bodyOffset + 4 + matrixIndex * 4)),
+          offset: Array.from({ length: elementOutput }, (_, offsetIndex) => readFloat32(payload, bodyOffset + 4 + matrixCount * 4 + offsetIndex * 4)),
+        });
+        break;
+      }
+      case "clut": {
+        const elementInput = readU16(payload, bodyOffset);
+        const elementOutput = readU16(payload, bodyOffset + 2);
+        const gridPoints = Array.from({ length: elementInput }, (_, gridIndex) => readU8(payload, bodyOffset + 4 + gridIndex));
+        const pointCount = gridPoints.reduce((acc, value) => acc * value, 1);
+        const valueCount = pointCount * elementOutput;
+        const values = new Float32Array(valueCount);
+        for (let valueIndex = 0; valueIndex < valueCount; valueIndex += 1) {
+          values[valueIndex] = readFloat32(payload, bodyOffset + 20 + valueIndex * 4);
+        }
+        elements.push({
+          kind: "clut",
+          inputChannels: elementInput,
+          outputChannels: elementOutput,
+          gridPoints,
+          values,
+        });
+        break;
+      }
+      case "bACS":
+      case "eACS":
+        elements.push({ kind: signature });
+        break;
+      default:
+        throw new Error(`Unsupported generic MPE element ${JSON.stringify(signature)} at offset ${elementOffset}`);
+    }
+  }
+
+  return {
+    kind: "mpet",
+    inputChannels,
+    outputChannels,
+    rawPayload: new Uint8Array(payload),
+    elements,
+  };
+}
+
 export function parseIccLutTag(data: Uint8Array, tag: CmsIccTagEntry): CmsParsedLutTagValue {
   const payload = sliceIccRange(data, tag.offset, tag.size, `LUT tag ${tag.signature}`);
   const type = readSignature(payload, 0);
@@ -207,6 +329,8 @@ export function parseIccLutTag(data: Uint8Array, tag: CmsIccTagEntry): CmsParsed
     case "mAB ":
     case "mBA ":
       return parseMultiProcessElements(payload, type.trimEnd() as "mAB" | "mBA");
+    case "mpet":
+      return parseGenericMultiProcessElements(payload);
     default:
       throw new Error(`Unsupported LUT tag type ${JSON.stringify(type)} for tag ${tag.signature}`);
   }
@@ -403,6 +527,11 @@ export function validateLutTagStructure(
       }
       break;
     }
+    case "mpet":
+      if (tag.elements.length === 0) {
+        issues.push("mpet must contain at least one element");
+      }
+      break;
   }
 
   return issues;
@@ -416,6 +545,7 @@ export function serializeIccLutTag(value: CmsParsedLutTagValue): Uint8Array {
       return serializeLut16(value);
     case "mAB":
     case "mBA":
+    case "mpet":
       return new Uint8Array(value.rawPayload);
   }
 }

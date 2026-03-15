@@ -339,6 +339,7 @@ export function parseIccTagValue(data: Uint8Array, tag: CmsIccTagEntry): CmsPars
     case "mft2":
     case "mAB ":
     case "mBA ":
+    case "mpet":
       return parseIccLutTag(data, tag);
     default:
       throw new Error(`Unsupported ICC tag type ${JSON.stringify(type)} for tag ${tag.signature}`);

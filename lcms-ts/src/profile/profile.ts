@@ -1,4 +1,5 @@
 import type { CmsHandle } from "../types/primitives.js";
+import { md5Hex } from "../hash/md5.js";
 import { serializeIccHeader, type CmsIccHeader } from "./header.js";
 import { buildSerializedTagTable, serializeIccTagRecord, type CmsSerializedTagRecord } from "./io-tags.js";
 import { parseIccTagValue, type CmsMlucTagValue, type CmsParsedTagValue } from "./tags.js";
@@ -57,8 +58,15 @@ export function serializeIccProfile(
   bytes.set(built.tagTable, 132);
   bytes.set(built.payloadBytes, 132 + built.tagTable.byteLength);
 
+  const profileId = computeSerializedProfileId(bytes);
+  const finalHeader: CmsIccHeader = {
+    ...resolvedHeader,
+    profileId,
+  };
+  bytes.set(serializeIccHeader(finalHeader), 0);
+
   return {
-    header: resolvedHeader,
+    header: finalHeader,
     tags: built.entries,
     bytes,
   };
@@ -319,6 +327,14 @@ function rebuildProfile(profile: CmsProfile, records: readonly CmsIccProfileReco
     header: serialized.header,
     records: [...records],
   };
+}
+
+function computeSerializedProfileId(bytes: Uint8Array): string {
+  const copy = new Uint8Array(bytes);
+  copy.fill(0, 44, 48);
+  copy.fill(0, 64, 68);
+  copy.fill(0, 84, 100);
+  return md5Hex(copy);
 }
 
 function serializeProfileRecord(record: CmsIccProfileRecord): CmsSerializedTagRecord {

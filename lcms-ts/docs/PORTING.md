@@ -15,22 +15,23 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
 - `src/profile/header.ts`, `src/profile/tag-table.ts`, `src/profile/tags.ts`, and `src/profile/lut.ts` parse ICC headers, tag tables, common tag payloads, and LUT tag structures used by the checked-in corpus.
 - `src/profile/io-base.ts` now centralizes low-level big-endian ICC reads/writes and the first header/tag-table serialization helpers.
 - `src/profile/io-tags.ts` now serializes the currently supported scalar and metadata tag payloads, including text/curve/LUT tags plus measurement, viewing, chromaticity, profile sequence, named color, dictionary, VCGT, video-signal, `MHC2`, UCR/BG, CRD info, screening, and array structures.
-- `src/profile/profile.ts` now assembles serialized headers, tag tables, and supported tag payloads into in-memory ICC profile bytes, plus a generic stream write helper.
+- `src/profile/profile.ts` now assembles serialized headers, tag tables, and supported tag payloads into in-memory ICC profile bytes, plus a generic stream write helper and save-time profile ID recomputation.
 - `src/pipeline/index.ts` maps `mft1`, `mft2`, `mAB`, and `mBA` tags into an internal pipeline model and evaluates them in float mode with multilinear or tetrahedral interpolation, including structured parsing of `mAB`/`mBA` curve, matrix, and CLUT blocks.
+- `src/hash/md5.ts` now ports the MD5 path used for ICC profile ID computation.
 - `src/core/context.ts` defines the first context abstraction that can later absorb plugin and error handler state.
 
 ## Current status
 
 - `cmsmtrx`, `cmspcs`, `cmswtpnt`, `cmsgamma`, and `cmslut` are `bootstrapped` rather than `planned`.
 - `cmsio0` is now `in-progress` with shared binary I/O primitives plus initial serialization support for ICC headers and tag tables.
-- `cmsio1` is now `in-progress` with supported scalar/LUT tag serialization, intent-based LUT selection, devicelink lookup, gray/RGB matrix-shaper fallbacks, and profile info lookup.
+- `cmsio1` is now `in-progress` with supported scalar/LUT tag serialization, intent-based LUT selection, devicelink lookup, float `DToB*` / `BToD*` tag selection, gray/RGB matrix-shaper fallbacks, and profile info lookup.
 - `cmstypes` is now `in-progress` with a growing ICC tag payload subset:
   - scalar/text types: `desc`, `text`, `mluc`, `XYZ `, `curv`, `para`, `sig `, `data`, `dtim`
   - measurement/viewing types: `meas`, `view`, `chrm`
   - table/sequence types: `clrt`, `ncl2`, `pseq`, `psid`, `dict`, `vcgt`, `MHC2`
   - print-oriented types: `bfd `, `crdi`, `scrn`, `cicp`
   - generic array types: `sf32`, `ui08`, `ui32`, `ui64`
-- There is now a minimal profile-level serializer for the supported tag set, including memory and generic stream helpers, but filesystem adapters and MD5/profile ID regeneration are still missing.
+- There is now a minimal profile-level serializer for the supported tag set, including memory and generic stream helpers, plus save-time MD5/profile ID regeneration.
 - ICC profile support is currently read-oriented:
   - header parsing
   - tag table parsing
@@ -61,7 +62,6 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
   - tag write-back
   - full tag type coverage
 - `cmsio1` still has unported advanced paths:
-  - float `DToB*` / `BToD*` LUT tags
   - named-color devicelink support
   - Lab v2/v4 normalization glue around pipelines
 - `cmstypes` still has notable gaps:

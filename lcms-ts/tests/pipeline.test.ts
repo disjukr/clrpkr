@@ -32,6 +32,39 @@ function loadTag(relativePath: string, signature: string) {
   return { data, tag };
 }
 
+function writeFloat32(buffer: Uint8Array, offset: number, value: number): void {
+  new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength).setFloat32(offset, value, false);
+}
+
+function createGenericMpePayload(signature: "D2B0" | "B2D0"): Uint8Array {
+  const matrixBody = new Uint8Array(4 + 9 * 4 + 3 * 4);
+  new DataView(matrixBody.buffer).setUint16(0, 3, false);
+  new DataView(matrixBody.buffer).setUint16(2, 3, false);
+  const matrix = [
+    0.5, 0, 0,
+    0, 0.5, 0,
+    0, 0, 0.5,
+  ];
+  matrix.forEach((value, index) => writeFloat32(matrixBody, 4 + index * 4, value));
+  [0, 0, 0].forEach((value, index) => writeFloat32(matrixBody, 4 + 9 * 4 + index * 4, value));
+
+  const matrixElement = new Uint8Array(8 + matrixBody.byteLength);
+  matrixElement.set(new TextEncoder().encode("matf"), 0);
+  matrixElement.set(matrixBody, 8);
+
+  const totalSize = 24 + matrixElement.byteLength;
+  const payload = new Uint8Array(totalSize);
+  payload.set(new TextEncoder().encode("mpet"), 0);
+  new DataView(payload.buffer).setUint16(8, 3, false);
+  new DataView(payload.buffer).setUint16(10, 3, false);
+  new DataView(payload.buffer).setUint32(12, 1, false);
+  new DataView(payload.buffer).setUint32(16, 24, false);
+  new DataView(payload.buffer).setUint32(20, matrixElement.byteLength, false);
+  payload.set(matrixElement, 24);
+  void signature;
+  return payload;
+}
+
 describe("pipeline mapping", () => {
   it("maps mAB tags to a stage sequence", () => {
     const { data, tag } = loadTag("color/sRGB_v4_ICC_preference.icc", "A2B0");
@@ -240,5 +273,37 @@ describe("pipeline mapping", () => {
 
     expect(perceptual?.stages.some((stage) => stage.kind === "clut16")).toBe(true);
     expect(saturation?.stages.some((stage) => stage.kind === "clut16")).toBe(true);
+  });
+
+  it("selects float DToB and BToD pipelines", () => {
+    const d2b0 = parseIccTagValue(createGenericMpePayload("D2B0"), {
+      signature: "D2B0",
+      offset: 0,
+      size: createGenericMpePayload("D2B0").byteLength,
+    });
+    const b2d0 = parseIccTagValue(createGenericMpePayload("B2D0"), {
+      signature: "B2D0",
+      offset: 0,
+      size: createGenericMpePayload("B2D0").byteLength,
+    });
+    const profile = cmsCreateProfilePlaceholder(
+      {
+        ...parseIccHeader(readFileSync(path.join(repoRoot, "icc-profiles", "color", "sRGB_v4_ICC_preference.icc"))),
+        colorSpace: "RGB ",
+        pcs: "Lab ",
+      },
+      [
+        { signature: "D2B0", value: d2b0 },
+        { signature: "B2D0", value: b2d0 },
+      ],
+    );
+
+    const input = cmsReadInputLUT(profile, 0);
+    const output = cmsReadOutputLUT(profile, 0);
+
+    expect(input?.stages[0]?.kind).toBe("matrix");
+    expect(input?.stages.at(-1)?.kind).toBe("normalize-from-lab");
+    expect(output?.stages[0]?.kind).toBe("normalize-to-lab");
+    expect(output?.stages.at(-1)?.kind).toBe("matrix");
   });
 });

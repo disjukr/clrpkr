@@ -84,7 +84,7 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     category: "profile-io",
     targetModule: "src/profile/io-tags.ts",
     status: "in-progress",
-    notes: "Supported tag payload serialization, profile info lookup, intent/LUT selection, devicelink lookup, and gray/RGB matrix-shaper fallbacks are in place; float LUT and named-color devicelink paths remain.",
+    notes: "Supported tag payload serialization, profile info lookup, intent/LUT selection, devicelink lookup, float DToB/BToD selection, and gray/RGB matrix-shaper fallbacks are in place; named-color devicelink remains.",
   },
   {
     upstreamSource: "cmslut.c",
@@ -97,8 +97,8 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     upstreamSource: "cmsmd5.c",
     category: "hash",
     targetModule: "src/hash/md5.ts",
-    status: "planned",
-    notes: "Can be replaced with native crypto when behavior matches.",
+    status: "in-progress",
+    notes: "Pure TypeScript MD5 and save-time profile ID recomputation are in place.",
   },
   {
     upstreamSource: "cmsmtrx.c",

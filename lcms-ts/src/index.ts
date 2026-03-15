@@ -3,6 +3,7 @@ export * from "./types/primitives.js";
 export * from "./types/color.js";
 export * from "./core/context.js";
 export * from "./color/conversions.js";
+export * from "./hash/md5.js";
 export * from "./math/matrix.js";
 export * from "./pipeline/index.js";
 export * from "./profile/header.js";
