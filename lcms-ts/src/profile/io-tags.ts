@@ -1,4 +1,5 @@
 import type { CmsIccXYZNumber } from "./header.js";
+import { cmsEvalToneCurveFloat, type CmsToneCurve } from "../tone-curve/index.js";
 import {
   type CmsIccDateTime,
   writeDateTime,
@@ -22,19 +23,28 @@ import type {
   CmsColorantTableTagValue,
   CmsDataTagValue,
   CmsDateTimeTagValue,
+  CmsDictionaryTagValue,
   CmsDescTagValue,
   CmsEmbeddedTextTagValue,
   CmsLocalizedString,
+  CmsMhc2TagValue,
   CmsMeasurementTagValue,
   CmsMlucTagValue,
+  CmsNamedColorTagValue,
   CmsParametricCurveTagValue,
   CmsParsedTagValue,
   CmsProfileSequenceDescTagValue,
   CmsProfileSequenceIdTagValue,
+  CmsS15Fixed16ArrayTagValue,
   CmsScreeningTagValue,
   CmsSignatureTagValue,
   CmsTextTagValue,
+  CmsUInt32ArrayTagValue,
+  CmsUInt64ArrayTagValue,
+  CmsUInt8ArrayTagValue,
   CmsUcrBgTagValue,
+  CmsVcgtTagValue,
+  CmsVideoSignalTagValue,
   CmsViewingConditionsTagValue,
   CmsXyzTagValue,
 } from "./tags.js";
@@ -46,6 +56,15 @@ function align4(value: number): number {
 function encodeAscii(text: string, zeroTerminated = false): Uint8Array {
   const bytes = new Uint8Array(text.length + (zeroTerminated ? 1 : 0));
   for (let index = 0; index < text.length; index += 1) {
+    bytes[index] = text.charCodeAt(index) & 0x7f;
+  }
+  return bytes;
+}
+
+function encodeAsciiFixed(text: string, length: number): Uint8Array {
+  const bytes = new Uint8Array(length);
+  const limit = Math.min(text.length, length - 1);
+  for (let index = 0; index < limit; index += 1) {
     bytes[index] = text.charCodeAt(index) & 0x7f;
   }
   return bytes;
@@ -237,6 +256,38 @@ function serializeColorantTableTag(value: CmsColorantTableTagValue): Uint8Array 
   return buffer;
 }
 
+function serializeNamedColorTag(value: CmsNamedColorTagValue): Uint8Array {
+  const deviceCoordCount = value.entries[0]?.deviceCoords.length ?? 0;
+  for (const entry of value.entries) {
+    if (entry.deviceCoords.length !== deviceCoordCount) {
+      throw new Error("Named color entries must use a consistent device coordinate count");
+    }
+  }
+
+  const recordSize = 38 + deviceCoordCount * 2;
+  const buffer = new Uint8Array(84 + value.entries.length * recordSize);
+  writeSignature(buffer, 0, "ncl2");
+  writeU32(buffer, 8, value.vendorFlag);
+  writeU32(buffer, 12, value.entries.length);
+  writeU32(buffer, 16, deviceCoordCount);
+  buffer.set(encodeAsciiFixed(value.prefix, 32), 20);
+  buffer.set(encodeAsciiFixed(value.suffix, 32), 52);
+
+  let cursor = 84;
+  for (const entry of value.entries) {
+    buffer.set(encodeAsciiFixed(entry.name, 32), cursor);
+    writeU16(buffer, cursor + 32, entry.pcs[0] ?? 0);
+    writeU16(buffer, cursor + 34, entry.pcs[1] ?? 0);
+    writeU16(buffer, cursor + 36, entry.pcs[2] ?? 0);
+    for (let index = 0; index < deviceCoordCount; index += 1) {
+      writeU16(buffer, cursor + 38 + index * 2, entry.deviceCoords[index] ?? 0);
+    }
+    cursor += recordSize;
+  }
+
+  return buffer;
+}
+
 function serializeEmbeddedTextTag(value: CmsEmbeddedTextTagValue): Uint8Array {
   switch (value.kind) {
     case "desc":
@@ -365,6 +416,230 @@ function serializeScreeningTag(value: CmsScreeningTagValue): Uint8Array {
   return buffer;
 }
 
+function serializeDictionaryTag(value: CmsDictionaryTagValue): Uint8Array {
+  const anyDisplayName = value.entries.some((entry) => entry.displayName);
+  const anyDisplayValue = value.entries.some((entry) => entry.displayValue);
+  const recordLength = 16 + (anyDisplayName ? 8 : 0) + (anyDisplayValue ? 8 : 0);
+  const directorySize = value.entries.length * recordLength;
+  const variableChunks: Uint8Array[] = [];
+  const buffer = new Uint8Array(16 + directorySize + value.entries.reduce((sum, entry) => {
+    const nameBytes = encodeUtf16Be(entry.name);
+    const valueBytes = encodeUtf16Be(entry.value);
+    const displayNameBytes = entry.displayName ? serializeMlucTag(entry.displayName) : undefined;
+    const displayValueBytes = entry.displayValue ? serializeMlucTag(entry.displayValue) : undefined;
+    variableChunks.push(nameBytes, valueBytes);
+    if (displayNameBytes) {
+      variableChunks.push(displayNameBytes);
+    }
+    if (displayValueBytes) {
+      variableChunks.push(displayValueBytes);
+    }
+    let total = align4(nameBytes.byteLength) + align4(valueBytes.byteLength);
+    if (displayNameBytes) {
+      total += align4(displayNameBytes.byteLength);
+    }
+    if (displayValueBytes) {
+      total += align4(displayValueBytes.byteLength);
+    }
+    return sum + total;
+  }, 0));
+
+  writeSignature(buffer, 0, "dict");
+  writeU32(buffer, 8, value.entries.length);
+  writeU32(buffer, 12, recordLength);
+
+  let recordOffset = 16;
+  let dataOffset = 16 + directorySize;
+
+  function writeChunk(chunk: Uint8Array): { offset: number; size: number } {
+    const offset = dataOffset;
+    buffer.set(chunk, offset);
+    dataOffset = align4(offset + chunk.byteLength);
+    return { offset, size: chunk.byteLength };
+  }
+
+  for (const entry of value.entries) {
+    const nameChunk = writeChunk(encodeUtf16Be(entry.name));
+    const valueChunk = writeChunk(encodeUtf16Be(entry.value));
+    writeU32(buffer, recordOffset, nameChunk.offset);
+    writeU32(buffer, recordOffset + 4, nameChunk.size);
+    writeU32(buffer, recordOffset + 8, valueChunk.offset);
+    writeU32(buffer, recordOffset + 12, valueChunk.size);
+
+    let optionalOffset = recordOffset + 16;
+    if (anyDisplayName) {
+      if (entry.displayName) {
+        const chunk = writeChunk(serializeMlucTag(entry.displayName));
+        writeU32(buffer, optionalOffset, chunk.offset);
+        writeU32(buffer, optionalOffset + 4, chunk.size);
+      }
+      optionalOffset += 8;
+    }
+    if (anyDisplayValue && entry.displayValue) {
+      const chunk = writeChunk(serializeMlucTag(entry.displayValue));
+      writeU32(buffer, optionalOffset, chunk.offset);
+      writeU32(buffer, optionalOffset + 4, chunk.size);
+    }
+
+    recordOffset += recordLength;
+  }
+
+  return buffer;
+}
+
+function serializeS15Fixed16ArrayTag(value: CmsS15Fixed16ArrayTagValue): Uint8Array {
+  const buffer = new Uint8Array(8 + value.values.length * 4);
+  writeSignature(buffer, 0, "sf32");
+  for (let index = 0; index < value.values.length; index += 1) {
+    writeS15Fixed16(buffer, 8 + index * 4, value.values[index]!);
+  }
+  return buffer;
+}
+
+function serializeUInt8ArrayTag(value: CmsUInt8ArrayTagValue): Uint8Array {
+  const buffer = new Uint8Array(8 + value.values.byteLength);
+  writeSignature(buffer, 0, "ui08");
+  buffer.set(value.values, 8);
+  return buffer;
+}
+
+function serializeUInt32ArrayTag(value: CmsUInt32ArrayTagValue): Uint8Array {
+  const buffer = new Uint8Array(8 + value.values.length * 4);
+  writeSignature(buffer, 0, "ui32");
+  for (let index = 0; index < value.values.length; index += 1) {
+    writeU32(buffer, 8 + index * 4, value.values[index]!);
+  }
+  return buffer;
+}
+
+function serializeUInt64ArrayTag(value: CmsUInt64ArrayTagValue): Uint8Array {
+  const buffer = new Uint8Array(8 + value.values.length * 8);
+  writeSignature(buffer, 0, "ui64");
+  for (let index = 0; index < value.values.length; index += 1) {
+    writeU64(buffer, 8 + index * 8, value.values[index]!);
+  }
+  return buffer;
+}
+
+function isVcgtFormulaCurve(curve: CmsToneCurve): curve is CmsToneCurve & { readonly parametricType: 5; readonly params: readonly number[] } {
+  return curve.parametricType === 5 && Array.isArray(curve.params) && curve.params.length >= 6;
+}
+
+function serializeVcgtTag(value: CmsVcgtTagValue): Uint8Array {
+  const [red, green, blue] = value.curves;
+  const allFormula = isVcgtFormulaCurve(red) && isVcgtFormulaCurve(green) && isVcgtFormulaCurve(blue);
+
+  if (value.storage === "formula" && allFormula) {
+    const buffer = new Uint8Array(48);
+    writeSignature(buffer, 0, "vcgt");
+    writeU32(buffer, 8, 1);
+    for (let index = 0; index < 3; index += 1) {
+      const curve = value.curves[index]!;
+      if (!isVcgtFormulaCurve(curve)) {
+        throw new Error("VCGT formula storage requires parametric type 5 curves");
+      }
+      const gamma = curve.params[0]!;
+      const min = curve.params[5] ?? 0;
+      const max = (curve.params[1] ?? 0) ** gamma + min;
+      const offset = 12 + index * 12;
+      writeS15Fixed16(buffer, offset, gamma);
+      writeS15Fixed16(buffer, offset + 4, min);
+      writeS15Fixed16(buffer, offset + 8, max);
+    }
+    return buffer;
+  }
+
+  const tableEntryCount = 256;
+  const buffer = new Uint8Array(18 + 3 * tableEntryCount * 2);
+  writeSignature(buffer, 0, "vcgt");
+  writeU32(buffer, 8, 0);
+  writeU16(buffer, 12, 3);
+  writeU16(buffer, 14, tableEntryCount);
+  writeU16(buffer, 16, 2);
+
+  let cursor = 18;
+  for (const curve of value.curves) {
+    for (let index = 0; index < tableEntryCount; index += 1) {
+      const sample = cmsEvalToneCurveFloat(curve, index / (tableEntryCount - 1));
+      writeU16(buffer, cursor, Math.max(0, Math.min(65535, Math.round(sample * 65535))));
+      cursor += 2;
+    }
+  }
+
+  return buffer;
+}
+
+function serializeVideoSignalTag(value: CmsVideoSignalTagValue): Uint8Array {
+  const buffer = new Uint8Array(12);
+  writeSignature(buffer, 0, "cicp");
+  buffer[8] = value.colourPrimaries & 0xff;
+  buffer[9] = value.transferCharacteristics & 0xff;
+  buffer[10] = value.matrixCoefficients & 0xff;
+  buffer[11] = value.videoFullRangeFlag & 0xff;
+  return buffer;
+}
+
+function matrixIsIdentity(values: readonly number[]): boolean {
+  return (
+    values.length >= 12 &&
+    values[0] === 1 &&
+    values[1] === 0 &&
+    values[2] === 0 &&
+    values[3] === 0 &&
+    values[4] === 0 &&
+    values[5] === 1 &&
+    values[6] === 0 &&
+    values[7] === 0 &&
+    values[8] === 0 &&
+    values[9] === 0 &&
+    values[10] === 1 &&
+    values[11] === 0
+  );
+}
+
+function serializeMhc2Tag(value: CmsMhc2TagValue): Uint8Array {
+  const hasMatrix = !matrixIsIdentity(value.xyzToXyzMatrix);
+  const matrixSize = hasMatrix ? 12 * 4 : 0;
+  const curveBlockSize = 8 + value.curveEntries * 4;
+  const matrixOffset = hasMatrix ? 36 : 0;
+  const redOffset = 36 + matrixSize;
+  const greenOffset = redOffset + curveBlockSize;
+  const blueOffset = greenOffset + curveBlockSize;
+  const buffer = new Uint8Array(blueOffset + curveBlockSize);
+
+  writeSignature(buffer, 0, "MHC2");
+  writeU32(buffer, 8, value.curveEntries);
+  writeS15Fixed16(buffer, 12, value.minLuminance);
+  writeS15Fixed16(buffer, 16, value.peakLuminance);
+  writeU32(buffer, 20, matrixOffset);
+  writeU32(buffer, 24, redOffset);
+  writeU32(buffer, 28, greenOffset);
+  writeU32(buffer, 32, blueOffset);
+
+  if (hasMatrix) {
+    for (let index = 0; index < 12; index += 1) {
+      writeS15Fixed16(buffer, matrixOffset + index * 4, value.xyzToXyzMatrix[index] ?? 0);
+    }
+  }
+
+  function writeCurve(offset: number, samples: readonly number[]): void {
+    if (samples.length !== value.curveEntries) {
+      throw new Error(`MHC2 curve sample count mismatch: expected ${value.curveEntries}, got ${samples.length}`);
+    }
+    writeSignature(buffer, offset, "sf32");
+    writeU32(buffer, offset + 4, 0);
+    for (let index = 0; index < value.curveEntries; index += 1) {
+      writeS15Fixed16(buffer, offset + 8 + index * 4, samples[index] ?? 0);
+    }
+  }
+
+  writeCurve(redOffset, value.redCurve);
+  writeCurve(greenOffset, value.greenCurve);
+  writeCurve(blueOffset, value.blueCurve);
+
+  return buffer;
+}
+
 function getParametricParameterCount(functionType: number): number {
   switch (functionType) {
     case 0:
@@ -407,23 +682,34 @@ export function serializeIccTagValue(
     | CmsColorantTableTagValue
     | CmsDataTagValue
     | CmsDateTimeTagValue
+    | CmsDictionaryTagValue
     | CmsDescTagValue
     | CmsLut16TagValue
     | CmsLut8TagValue
+    | CmsMhc2TagValue
     | CmsMeasurementTagValue
     | CmsMultiProcessElementTagValue
     | CmsMlucTagValue
+    | CmsNamedColorTagValue
     | CmsParametricCurveTagValue
     | CmsProfileSequenceDescTagValue
     | CmsProfileSequenceIdTagValue
+    | CmsS15Fixed16ArrayTagValue
     | CmsScreeningTagValue
     | CmsSignatureTagValue
     | CmsTextTagValue
+    | CmsUInt32ArrayTagValue
+    | CmsUInt64ArrayTagValue
+    | CmsUInt8ArrayTagValue
     | CmsUcrBgTagValue
+    | CmsVcgtTagValue
+    | CmsVideoSignalTagValue
     | CmsViewingConditionsTagValue
     | CmsXyzTagValue,
 ): Uint8Array {
   switch (value.kind) {
+    case "cicp":
+      return serializeVideoSignalTag(value);
     case "chrm":
       return serializeChromaticityTag(value);
     case "clrt":
@@ -434,6 +720,8 @@ export function serializeIccTagValue(
       return serializeCrdInfoTag(value);
     case "data":
       return serializeDataTag(value);
+    case "dict":
+      return serializeDictionaryTag(value);
     case "dtim":
       return serializeDateTimeTag(value);
     case "text":
@@ -445,8 +733,12 @@ export function serializeIccTagValue(
       return serializeIccLutTag(value);
     case "mluc":
       return serializeMlucTag(value);
+    case "MHC2":
+      return serializeMhc2Tag(value);
     case "meas":
       return serializeMeasurementTag(value);
+    case "ncl2":
+      return serializeNamedColorTag(value);
     case "XYZ":
       return serializeXyzTag(value);
     case "curv":
@@ -457,12 +749,22 @@ export function serializeIccTagValue(
       return serializeProfileSequenceDescTag(value);
     case "psid":
       return serializeProfileSequenceIdTag(value);
+    case "sf32":
+      return serializeS15Fixed16ArrayTag(value);
     case "scrn":
       return serializeScreeningTag(value);
     case "sig":
       return serializeSignatureTag(value);
+    case "ui08":
+      return serializeUInt8ArrayTag(value);
+    case "ui32":
+      return serializeUInt32ArrayTag(value);
+    case "ui64":
+      return serializeUInt64ArrayTag(value);
     case "bfd":
       return serializeUcrBgTag(value);
+    case "vcgt":
+      return serializeVcgtTag(value);
     case "view":
       return serializeViewingConditionsTag(value);
   }

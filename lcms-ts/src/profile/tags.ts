@@ -140,6 +140,77 @@ export interface CmsScreeningTagValue {
   readonly channels: readonly CmsScreeningChannel[];
 }
 
+export interface CmsNamedColorEntry {
+  readonly name: string;
+  readonly pcs: readonly [number, number, number];
+  readonly deviceCoords: readonly number[];
+}
+
+export interface CmsNamedColorTagValue {
+  readonly kind: "ncl2";
+  readonly vendorFlag: number;
+  readonly prefix: string;
+  readonly suffix: string;
+  readonly entries: readonly CmsNamedColorEntry[];
+}
+
+export interface CmsDictionaryEntry {
+  readonly name: string;
+  readonly value: string;
+  readonly displayName?: CmsMlucTagValue;
+  readonly displayValue?: CmsMlucTagValue;
+}
+
+export interface CmsDictionaryTagValue {
+  readonly kind: "dict";
+  readonly entries: readonly CmsDictionaryEntry[];
+}
+
+export interface CmsS15Fixed16ArrayTagValue {
+  readonly kind: "sf32";
+  readonly values: readonly number[];
+}
+
+export interface CmsUInt8ArrayTagValue {
+  readonly kind: "ui08";
+  readonly values: Uint8Array;
+}
+
+export interface CmsUInt32ArrayTagValue {
+  readonly kind: "ui32";
+  readonly values: readonly number[];
+}
+
+export interface CmsUInt64ArrayTagValue {
+  readonly kind: "ui64";
+  readonly values: readonly bigint[];
+}
+
+export interface CmsVideoSignalTagValue {
+  readonly kind: "cicp";
+  readonly colourPrimaries: number;
+  readonly transferCharacteristics: number;
+  readonly matrixCoefficients: number;
+  readonly videoFullRangeFlag: number;
+}
+
+export interface CmsVcgtTagValue {
+  readonly kind: "vcgt";
+  readonly storage: "formula" | "table";
+  readonly curves: readonly [CmsToneCurve, CmsToneCurve, CmsToneCurve];
+}
+
+export interface CmsMhc2TagValue {
+  readonly kind: "MHC2";
+  readonly curveEntries: number;
+  readonly minLuminance: number;
+  readonly peakLuminance: number;
+  readonly xyzToXyzMatrix: readonly number[];
+  readonly redCurve: readonly number[];
+  readonly greenCurve: readonly number[];
+  readonly blueCurve: readonly number[];
+}
+
 export interface CmsParametricCurveTagValue {
   readonly kind: "para";
   readonly functionType: number;
@@ -154,17 +225,26 @@ export type CmsParsedTagValue =
   | CmsCrdInfoTagValue
   | CmsDataTagValue
   | CmsDateTimeTagValue
+  | CmsDictionaryTagValue
   | CmsDescTagValue
   | CmsMeasurementTagValue
+  | CmsMhc2TagValue
   | CmsParsedLutTagValue
   | CmsMlucTagValue
+  | CmsNamedColorTagValue
   | CmsParametricCurveTagValue
   | CmsProfileSequenceDescTagValue
   | CmsProfileSequenceIdTagValue
+  | CmsS15Fixed16ArrayTagValue
   | CmsScreeningTagValue
   | CmsSignatureTagValue
   | CmsTextTagValue
+  | CmsUInt32ArrayTagValue
+  | CmsUInt64ArrayTagValue
+  | CmsUInt8ArrayTagValue
   | CmsUcrBgTagValue
+  | CmsVcgtTagValue
+  | CmsVideoSignalTagValue
   | CmsViewingConditionsTagValue
   | CmsXyzTagValue;
 
@@ -219,22 +299,40 @@ export function parseIccTagValue(data: Uint8Array, tag: CmsIccTagEntry): CmsPars
       return parseDataTag(payload);
     case "dtim":
       return parseDateTimeTag(payload);
+    case "dict":
+      return parseDictionaryTag(payload);
     case "meas":
       return parseMeasurementTag(payload);
+    case "MHC2":
+      return parseMhc2Tag(payload);
+    case "ncl2":
+      return parseNamedColorTag(payload);
     case "para":
       return parseParametricCurveTag(payload);
     case "pseq":
       return parseProfileSequenceDescTag(payload);
     case "psid":
       return parseProfileSequenceIdTag(payload);
+    case "sf32":
+      return parseS15Fixed16ArrayTag(payload);
     case "scrn":
       return parseScreeningTag(payload);
     case "sig ":
       return parseSignatureTag(payload);
+    case "ui08":
+      return parseUInt8ArrayTag(payload);
+    case "ui32":
+      return parseUInt32ArrayTag(payload);
+    case "ui64":
+      return parseUInt64ArrayTag(payload);
     case "bfd ":
       return parseUcrBgTag(payload);
+    case "vcgt":
+      return parseVcgtTag(payload);
     case "view":
       return parseViewingConditionsTag(payload);
+    case "cicp":
+      return parseVideoSignalTag(payload);
     case "chrm":
       return parseChromaticityTag(payload);
     case "mft1":
@@ -628,6 +726,247 @@ function parseScreeningTag(payload: Uint8Array): CmsScreeningTagValue {
     kind: "scrn",
     flag,
     channels,
+  };
+}
+
+function parseNamedColorTag(payload: Uint8Array): CmsNamedColorTagValue {
+  const vendorFlag = readU32(payload, 8);
+  const count = readU32(payload, 12);
+  const deviceCoordCount = readU32(payload, 16);
+  const prefix = trimTrailingNul(readAscii(payload, 20, 32));
+  const suffix = trimTrailingNul(readAscii(payload, 52, 32));
+  const entries: CmsNamedColorEntry[] = [];
+  let cursor = 84;
+
+  for (let index = 0; index < count; index += 1) {
+    const name = trimTrailingNul(readAscii(payload, cursor, 32));
+    const pcs: [number, number, number] = [
+      readU16(payload, cursor + 32),
+      readU16(payload, cursor + 34),
+      readU16(payload, cursor + 36),
+    ];
+    const deviceCoords = Array.from({ length: deviceCoordCount }, (_, coordIndex) => readU16(payload, cursor + 38 + coordIndex * 2));
+    entries.push({ name, pcs, deviceCoords });
+    cursor += 38 + deviceCoordCount * 2;
+  }
+
+  return {
+    kind: "ncl2",
+    vendorFlag,
+    prefix,
+    suffix,
+    entries,
+  };
+}
+
+function readUtf16BeString(payload: Uint8Array, offset: number, byteLength: number): string {
+  return readUtf16Be(payload, offset, byteLength);
+}
+
+function parseDictionaryTag(payload: Uint8Array): CmsDictionaryTagValue {
+  const count = readU32(payload, 8);
+  const recordLength = readU32(payload, 12);
+  if (recordLength !== 16 && recordLength !== 24 && recordLength !== 32) {
+    throw new Error(`Unsupported dictionary record length: ${recordLength}`);
+  }
+
+  const entries: CmsDictionaryEntry[] = [];
+  let cursor = 16;
+
+  for (let index = 0; index < count; index += 1) {
+    const nameOffset = readU32(payload, cursor);
+    const nameSize = readU32(payload, cursor + 4);
+    const valueOffset = readU32(payload, cursor + 8);
+    const valueSize = readU32(payload, cursor + 12);
+    let displayName: CmsMlucTagValue | undefined;
+    let displayValue: CmsMlucTagValue | undefined;
+
+    if (recordLength > 16) {
+      const displayNameOffset = readU32(payload, cursor + 16);
+      const displayNameSize = readU32(payload, cursor + 20);
+      if (displayNameOffset !== 0 && displayNameSize !== 0) {
+        const parsed = parseMlucTag(payload.slice(displayNameOffset, displayNameOffset + displayNameSize));
+        displayName = parsed;
+      }
+    }
+
+    if (recordLength > 24) {
+      const displayValueOffset = readU32(payload, cursor + 24);
+      const displayValueSize = readU32(payload, cursor + 28);
+      if (displayValueOffset !== 0 && displayValueSize !== 0) {
+        const parsed = parseMlucTag(payload.slice(displayValueOffset, displayValueOffset + displayValueSize));
+        displayValue = parsed;
+      }
+    }
+
+    entries.push({
+      name: trimTrailingNul(readUtf16BeString(payload, nameOffset, nameSize)),
+      value: trimTrailingNul(readUtf16BeString(payload, valueOffset, valueSize)),
+      ...(displayName ? { displayName } : {}),
+      ...(displayValue ? { displayValue } : {}),
+    });
+
+    cursor += recordLength;
+  }
+
+  return {
+    kind: "dict",
+    entries,
+  };
+}
+
+function parseS15Fixed16ArrayTag(payload: Uint8Array): CmsS15Fixed16ArrayTagValue {
+  const count = (payload.byteLength - 8) / 4;
+  const values: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    values.push(readS15Fixed16(payload, 8 + index * 4));
+  }
+  return {
+    kind: "sf32",
+    values,
+  };
+}
+
+function parseUInt8ArrayTag(payload: Uint8Array): CmsUInt8ArrayTagValue {
+  return {
+    kind: "ui08",
+    values: payload.slice(8),
+  };
+}
+
+function parseUInt32ArrayTag(payload: Uint8Array): CmsUInt32ArrayTagValue {
+  const count = (payload.byteLength - 8) / 4;
+  const values: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    values.push(readU32(payload, 8 + index * 4));
+  }
+  return {
+    kind: "ui32",
+    values,
+  };
+}
+
+function parseUInt64ArrayTag(payload: Uint8Array): CmsUInt64ArrayTagValue {
+  const count = (payload.byteLength - 8) / 8;
+  const values: bigint[] = [];
+  for (let index = 0; index < count; index += 1) {
+    values.push(readU64(payload, 8 + index * 8));
+  }
+  return {
+    kind: "ui64",
+    values,
+  };
+}
+
+function parseVideoSignalTag(payload: Uint8Array): CmsVideoSignalTagValue {
+  return {
+    kind: "cicp",
+    colourPrimaries: payload[8] ?? 0,
+    transferCharacteristics: payload[9] ?? 0,
+    matrixCoefficients: payload[10] ?? 0,
+    videoFullRangeFlag: payload[11] ?? 0,
+  };
+}
+
+function parseVcgtTag(payload: Uint8Array): CmsVcgtTagValue {
+  const tagType = readU32(payload, 8);
+
+  switch (tagType) {
+    case 0: {
+      const channelCount = readU16(payload, 12);
+      const entryCount = readU16(payload, 14);
+      let bytesPerEntry = readU16(payload, 16);
+      let cursor = 18;
+
+      if (channelCount !== 3) {
+        throw new Error(`Unsupported VCGT channel count: ${channelCount}`);
+      }
+
+      if (entryCount === 256 && bytesPerEntry === 1 && payload.byteLength === 1576) {
+        bytesPerEntry = 2;
+      }
+
+      const curves: [CmsToneCurve, CmsToneCurve, CmsToneCurve] = [
+        cmsBuildTabulatedToneCurve16(entryCount),
+        cmsBuildTabulatedToneCurve16(entryCount),
+        cmsBuildTabulatedToneCurve16(entryCount),
+      ];
+
+      for (let channel = 0; channel < 3; channel += 1) {
+        const table = curves[channel]!.table16;
+        for (let index = 0; index < entryCount; index += 1) {
+          if (bytesPerEntry === 1) {
+            const value = payload[cursor] ?? 0;
+            table[index] = value * 257;
+            cursor += 1;
+          } else if (bytesPerEntry === 2) {
+            table[index] = readU16(payload, cursor);
+            cursor += 2;
+          } else {
+            throw new Error(`Unsupported VCGT element width: ${bytesPerEntry}`);
+          }
+        }
+      }
+
+      return {
+        kind: "vcgt",
+        storage: "table",
+        curves,
+      };
+    }
+    case 1: {
+      const curves: CmsToneCurve[] = [];
+
+      for (let channel = 0; channel < 3; channel += 1) {
+        const gamma = readS15Fixed16(payload, 12 + channel * 12);
+        const min = readS15Fixed16(payload, 16 + channel * 12);
+        const max = readS15Fixed16(payload, 20 + channel * 12);
+        const a = (max - min) ** (1 / gamma);
+        curves.push(cmsBuildParametricToneCurve(5, [gamma, a, 0, 0, 0, min, 0]));
+      }
+
+      return {
+        kind: "vcgt",
+        storage: "formula",
+        curves: [curves[0]!, curves[1]!, curves[2]!],
+      };
+    }
+    default:
+      throw new Error(`Unsupported VCGT storage type: ${tagType}`);
+  }
+}
+
+function parseMhc2Tag(payload: Uint8Array): CmsMhc2TagValue {
+  const curveEntries = readU32(payload, 8);
+  const minLuminance = readS15Fixed16(payload, 12);
+  const peakLuminance = readS15Fixed16(payload, 16);
+  const matrixOffset = readU32(payload, 20);
+  const redOffset = readU32(payload, 24);
+  const greenOffset = readU32(payload, 28);
+  const blueOffset = readU32(payload, 32);
+
+  const xyzToXyzMatrix =
+    matrixOffset === 0
+      ? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+      : Array.from({ length: 12 }, (_, index) => readS15Fixed16(payload, matrixOffset + index * 4));
+
+  function readCurve(offset: number): readonly number[] {
+    const type = readSignature(payload, offset);
+    if (type !== "sf32") {
+      throw new Error(`Unsupported MHC2 curve payload type ${JSON.stringify(type)}`);
+    }
+    return Array.from({ length: curveEntries }, (_, index) => readS15Fixed16(payload, offset + 8 + index * 4));
+  }
+
+  return {
+    kind: "MHC2",
+    curveEntries,
+    minLuminance,
+    peakLuminance,
+    xyzToXyzMatrix,
+    redCurve: readCurve(redOffset),
+    greenCurve: readCurve(greenOffset),
+    blueCurve: readCurve(blueOffset),
   };
 }
 
