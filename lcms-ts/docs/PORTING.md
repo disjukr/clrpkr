@@ -63,6 +63,7 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
   - tag write-back
   - full tag type coverage
 - `cmstypes` payload coverage is now broad enough to treat profile tag parsing/writing as `done` for the current scope; remaining richer `multiProcessElementType` plugin paths sit closer to `cmslut`/plugin extensibility than to common scalar tag handling.
+- Generic `mpet` handling now preserves unknown/vendor elements as raw payload blocks and can serialize structured `bACS`/`eACS`, matrix, and float CLUT elements without falling back to opaque bytes.
 - Transform creation and execution APIs are still missing:
   - profile linking
   - intent handling
