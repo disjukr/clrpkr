@@ -513,7 +513,7 @@ function evaluateNormalizationStage(
       ];
     case "normalize-from-lab":
       return [
-        clampUnit((input[0] ?? 0) * 100),
+        (input[0] ?? 0) * 100,
         (input[1] ?? 0) * 255 - 128,
         (input[2] ?? 0) * 255 - 128,
       ];

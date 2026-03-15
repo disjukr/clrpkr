@@ -497,4 +497,21 @@ describe("pipeline mapping", () => {
     expect(automatic[0]).toBeCloseTo(multilinear[0]!, 6);
     expect(automatic[0]).toBeCloseTo(0.25, 6);
   });
+
+  it("keeps Lab normalization stages inverse on L*", () => {
+    const pipeline = {
+      inputChannels: 3,
+      outputChannels: 3,
+      stages: [
+        { kind: "normalize-to-lab" as const },
+        { kind: "normalize-from-lab" as const },
+      ],
+    };
+
+    const output = cmsPipelineEvalFloat([50, 0, -10], pipeline);
+
+    expect(output[0]).toBeCloseTo(50, 6);
+    expect(output[1]).toBeCloseTo(0, 6);
+    expect(output[2]).toBeCloseTo(-10, 6);
+  });
 });
