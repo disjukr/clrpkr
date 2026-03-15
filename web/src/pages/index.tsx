@@ -35,6 +35,18 @@ export default function IndexRoute() {
                 Upload ICC or ICM profiles and inspect headers, tags, raw payloads, and intent-based LUT selection.
               </p>
             </a>
+            <a
+              className="block rounded-[1.75rem] border border-black/8 bg-[rgba(255,252,246,0.78)] p-5 text-inherit no-underline shadow-[0_18px_45px_rgba(70,48,22,0.1)] backdrop-blur transition hover:translate-y-[-2px] hover:shadow-[0_22px_50px_rgba(70,48,22,0.14)]"
+              href="/nrrd"
+            >
+              <div className="mb-4 flex items-baseline justify-between gap-4">
+                <h2>NRRD Viewer</h2>
+                <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">/nrrd</span>
+              </div>
+              <p className="m-0 leading-7">
+                Open generated SDF volumes, scrub Lab-space slices, and orbit the volume in 3D with react-three-fiber.
+              </p>
+            </a>
           </section>
         </div>
       </main>

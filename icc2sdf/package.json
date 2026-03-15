@@ -4,15 +4,23 @@
   "private": true,
   "type": "module",
   "description": "ICC gamut to Lab-space signed distance field tooling",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
   "files": [
     "dist"
   ],
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./nrrd": {
+      "types": "./dist/src/nrrd.d.ts",
+      "import": "./dist/src/nrrd.js"
+    },
+    "./types": {
+      "types": "./dist/src/types.d.ts",
+      "import": "./dist/src/types.js"
     }
   },
   "scripts": {
@@ -20,7 +28,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "lcms-ts": "workspace:*"
+    "lcms-ts": "workspace:*",
+    "webgpu": "^0.3.8"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.66",

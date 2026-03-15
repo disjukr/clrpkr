@@ -11,6 +11,7 @@ import type {
   IccOccupancyBuildConfig,
   LabVolumeBounds,
   LabVolumeDimensions,
+  LabLattice,
   LabVolumeSpacing,
   OccupancyGrid,
   ScalarVolume,
@@ -102,7 +103,11 @@ function evaluatePipelineToLab(
   }
 
   if (pcs === "Lab ") {
-    return [output[0] ?? 0, output[1] ?? 0, output[2] ?? 0];
+    return [
+      (output[0] ?? 0) * 100,
+      (output[1] ?? 0) * 255 - 128,
+      (output[2] ?? 0) * 255 - 128,
+    ];
   }
 
   if (pcs === "XYZ ") {
@@ -204,7 +209,7 @@ function markTetrahedronOccupancy(
   for (let z = minZ; z <= maxZ; z += 1) {
     for (let y = minY; y <= maxY; y += 1) {
       for (let x = minX; x <= maxX; x += 1) {
-        if (pointInTetrahedron([x, y, z], tetra)) {
+        if (pointInTetrahedron([x + 0.5, y + 0.5, z + 0.5], tetra)) {
           occupancy[voxelIndex(dimensions, x, y, z)] = 1;
         }
       }
@@ -215,6 +220,7 @@ function markTetrahedronOccupancy(
 function buildLabLattice(
   resolution: number,
   pcs: string,
+  mapInput: (u: number, v: number, w: number) => readonly number[],
   evaluate: (input: readonly number[]) => number[],
   bounds: LabVolumeBounds,
   dimensions: LabVolumeDimensions,
@@ -228,7 +234,9 @@ function buildLabLattice(
       const gf = sampleCoordinate(g, resolution);
       for (let b = 0; b < resolution; b += 1) {
         const bf = sampleCoordinate(b, resolution);
-        const lab = evaluatePipelineToLab(pcs, [rf, gf, bf], evaluate);
+        const lab = evaluatePipelineToLab(pcs, [rf, gf, bf], (sample) =>
+          evaluate(mapInput(sample[0] ?? 0, sample[1] ?? 0, sample[2] ?? 0)),
+        );
 
         if (lab == null) {
           continue;
@@ -250,6 +258,49 @@ function buildLabLattice(
   }
 
   return { positions, valid };
+}
+
+function createLabLatticeMetadata(
+  config: IccOccupancyBuildConfig,
+): OccupancyGrid["metadata"] {
+  const dimensions = config.dimensions ?? DEFAULT_DIMENSIONS;
+  const bounds = config.bounds ?? DEFAULT_BOUNDS;
+  const sampleResolution = config.sampleResolution ?? DEFAULT_SAMPLE_RESOLUTION;
+  const intent = config.intent ?? INTENT_PERCEPTUAL;
+
+  if (!Number.isInteger(sampleResolution) || sampleResolution < 2) {
+    throw new RangeError("sampleResolution must be an integer greater than or equal to 2");
+  }
+
+  return {
+    dimensions,
+    bounds,
+    spacing: computeSpacing(dimensions, bounds),
+    sampleResolution,
+    intent,
+  };
+}
+
+function buildFaceInputMapper(
+  fixedChannel: number,
+  fixedValue: number,
+): (u: number, v: number, w: number) => readonly number[] {
+  return (u, v, w) => {
+    const values = [0, 0, 0, 0];
+    const varying = [u, v, w];
+    let varyingIndex = 0;
+
+    for (let channel = 0; channel < 4; channel += 1) {
+      if (channel === fixedChannel) {
+        values[channel] = fixedValue;
+      } else {
+        values[channel] = varying[varyingIndex] ?? 0;
+        varyingIndex += 1;
+      }
+    }
+
+    return values;
+  };
 }
 
 function voxelizeLabLatticeCells(
@@ -303,21 +354,58 @@ export function buildLabOccupancyGridFromIcc(
   iccBytes: Uint8Array,
   config: IccOccupancyBuildConfig = {},
 ): OccupancyGrid {
+  const lattices = buildLabLatticesFromIcc(iccBytes, config);
+  const metadata = lattices[0]?.metadata;
+  if (metadata == null) {
+    throw new Error("No lattice data was produced for the ICC profile");
+  }
+  const occupancy = new Uint8Array(
+    metadata.dimensions.width *
+      metadata.dimensions.height *
+      metadata.dimensions.depth,
+  );
+
+  for (const lattice of lattices) {
+    voxelizeLabLatticeCells(
+      occupancy,
+      lattice.metadata.dimensions,
+      {
+        positions: lattice.positions,
+        valid: lattice.valid,
+      },
+      lattice.metadata.sampleResolution,
+    );
+  }
+
+  return {
+    metadata,
+    data: occupancy,
+  };
+}
+
+export function buildLabLatticeFromIcc(
+  iccBytes: Uint8Array,
+  config: IccOccupancyBuildConfig = {},
+): LabLattice {
+  const lattices = buildLabLatticesFromIcc(iccBytes, config);
+  if (lattices.length !== 1) {
+    throw new Error("buildLabLatticeFromIcc only returns a single lattice for 3-channel profiles");
+  }
+  return lattices[0]!;
+}
+
+export function buildLabLatticesFromIcc(
+  iccBytes: Uint8Array,
+  config: IccOccupancyBuildConfig = {},
+): LabLattice[] {
+  const metadata = createLabLatticeMetadata(config);
   const dimensions = config.dimensions ?? DEFAULT_DIMENSIONS;
   const bounds = config.bounds ?? DEFAULT_BOUNDS;
-  const sampleResolution = config.sampleResolution ?? DEFAULT_SAMPLE_RESOLUTION;
-  const intent = config.intent ?? INTENT_PERCEPTUAL;
   const profile = cmsOpenProfileFromMem(iccBytes);
-  const pipeline = cmsReadInputLUT(profile, intent);
+  const pipeline = cmsReadInputLUT(profile, metadata.intent);
 
   if (pipeline == null) {
     throw new Error("The ICC profile does not expose a readable device-to-PCS pipeline");
-  }
-
-  if (pipeline.inputChannels !== 3) {
-    throw new Error(
-      `Only 3-channel input profiles are supported right now, got ${pipeline.inputChannels}`,
-    );
   }
 
   const pcs = cmsGetPCS(profile);
@@ -325,34 +413,55 @@ export function buildLabOccupancyGridFromIcc(
     throw new Error(`Only Lab and XYZ PCS profiles are supported right now, got ${pcs}`);
   }
 
-  if (!Number.isInteger(sampleResolution) || sampleResolution < 2) {
-    throw new RangeError("sampleResolution must be an integer greater than or equal to 2");
+  const evaluate = (input: readonly number[]) => cmsPipelineEvalFloat(input, pipeline);
+
+  if (pipeline.inputChannels === 3) {
+    const lattice = buildLabLattice(
+      metadata.sampleResolution,
+      pcs,
+      (u, v, w) => [u, v, w],
+      evaluate,
+      bounds,
+      dimensions,
+    );
+
+    return [
+      {
+        metadata,
+        positions: lattice.positions,
+        valid: lattice.valid,
+      },
+    ];
   }
 
-  const occupancy = new Uint8Array(
-    dimensions.width * dimensions.height * dimensions.depth,
-  );
-  const spacing = computeSpacing(dimensions, bounds);
-  const evaluate = (input: readonly number[]) => cmsPipelineEvalFloat(input, pipeline);
-  const lattice = buildLabLattice(
-    sampleResolution,
-    pcs,
-    evaluate,
-    bounds,
-    dimensions,
-  );
-  voxelizeLabLatticeCells(occupancy, dimensions, lattice, sampleResolution);
+  if (pipeline.inputChannels === 4) {
+    const lattices: LabLattice[] = [];
 
-  return {
-    metadata: {
-      dimensions,
-      bounds,
-      spacing,
-      sampleResolution,
-      intent,
-    },
-    data: occupancy,
-  };
+    for (let fixedChannel = 0; fixedChannel < 4; fixedChannel += 1) {
+      for (const fixedValue of [0, 1] as const) {
+        const lattice = buildLabLattice(
+          metadata.sampleResolution,
+          pcs,
+          buildFaceInputMapper(fixedChannel, fixedValue),
+          evaluate,
+          bounds,
+          dimensions,
+        );
+
+        lattices.push({
+          metadata,
+          positions: lattice.positions,
+          valid: lattice.valid,
+        });
+      }
+    }
+
+    return lattices;
+  }
+
+  throw new Error(
+    `Only 3-channel and 4-channel input profiles are supported right now, got ${pipeline.inputChannels}`,
+  );
 }
 
 export function occupancyGridToScalarVolume(

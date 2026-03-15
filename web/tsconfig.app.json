@@ -12,7 +12,10 @@
     "moduleResolution": "bundler",
     "baseUrl": ".",
     "paths": {
-      "lcms-ts": ["../lcms-ts/dist/src/index.d.ts"]
+      "lcms-ts": ["../lcms-ts/dist/src/index.d.ts"],
+      "icc2sdf": ["../icc2sdf/dist/src/index.d.ts"],
+      "icc2sdf/nrrd": ["../icc2sdf/dist/src/nrrd.d.ts"],
+      "icc2sdf/types": ["../icc2sdf/dist/src/types.d.ts"]
     },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,

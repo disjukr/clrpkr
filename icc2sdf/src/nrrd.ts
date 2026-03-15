@@ -146,9 +146,18 @@ export function parseNrrdHeader(headerText: string): ParsedNrrdHeader {
 }
 
 function createView(bytes: Uint8Array): Float32Array {
+  const byteOffset = bytes.byteOffset;
+  if (byteOffset % Float32Array.BYTES_PER_ELEMENT === 0) {
+    return new Float32Array(
+      bytes.buffer,
+      byteOffset,
+      Math.floor(bytes.byteLength / Float32Array.BYTES_PER_ELEMENT),
+    );
+  }
+
   const buffer = bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength,
+    byteOffset,
+    byteOffset + bytes.byteLength,
   );
   return new Float32Array(buffer);
 }

@@ -30,7 +30,8 @@ export async function createNodeGpuRuntime(
   let dawnModule: DawnNodeModule;
   try {
     const module = await import("webgpu");
-    dawnModule = module.default as DawnNodeModule;
+    dawnModule = { create: module.create };
+    if (module.globals != null) dawnModule.globals = module.globals;
   } catch (error) {
     throw new Error(
       "Node WebGPU runtime is unavailable. Install the `webgpu` package backed by dawn.node before calling createNodeGpuRuntime().",

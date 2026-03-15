@@ -32,6 +32,12 @@ export interface OccupancyGrid {
   data: Uint8Array;
 }
 
+export interface LabLattice {
+  metadata: OccupancyGridMetadata;
+  positions: Float32Array;
+  valid: Uint8Array;
+}
+
 export interface ScalarVolumeDimensions {
   width: number;
   height: number;
@@ -76,6 +82,10 @@ export interface IccSdfBuildConfig {
 export interface OccupancyToSdfConfig {
   distanceUnit?: "voxels" | "lab";
   insideNegative?: boolean;
+}
+
+export interface GpuBuildOptions {
+  device: GPUDevice;
 }
 
 export interface IccOccupancyBuildConfig {

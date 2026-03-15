@@ -1,3 +1,4 @@
+export * from "./gpu.js";
 export * from "./occupancy.js";
 export * from "./nrrd.js";
 export * from "./runtime.js";

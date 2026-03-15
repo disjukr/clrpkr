@@ -1,0 +1,756 @@
+import Head from "next/head";
+import Link from "next/link";
+import {
+  type ChangeEvent,
+  type ReactNode,
+  startTransition,
+  useEffect,
+  useId,
+  useMemo,
+  useState,
+} from "react";
+import {
+  ClampToEdgeWrapping,
+  DataTexture,
+  DoubleSide,
+  LinearFilter,
+  type Texture,
+} from "three";
+import { parseNrrd } from "../../../icc2sdf/dist/src/nrrd.js";
+import type { NrrdVolume } from "../../../icc2sdf/dist/src/types.js";
+
+type NrrdPreset = {
+  readonly path: string;
+  readonly label: string;
+  readonly fileName: string;
+};
+
+type LoadedVolume = {
+  readonly fileName: string;
+  readonly fileSize: number;
+  readonly volume: NrrdVolume<Float32Array>;
+};
+
+type VolumeStats = {
+  readonly min: number;
+  readonly max: number;
+  readonly maxAbs: number;
+};
+
+type SurfacePointCloud = {
+  readonly positions: Float32Array;
+  readonly colors: Float32Array;
+  readonly count: number;
+};
+
+type SliceAxis = "x" | "y" | "z";
+
+type R3fDeps = {
+  readonly Canvas: typeof import("@react-three/fiber").Canvas;
+  readonly OrbitControls: typeof import("@react-three/drei").OrbitControls;
+};
+
+const SURFACE_POINT_LIMIT = 48_000;
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function clamp01(value: number): number {
+  if (value <= 0) return 0;
+  if (value >= 1) return 1;
+  return value;
+}
+
+function loadFileBytes(file: File): Promise<Uint8Array> {
+  return file.arrayBuffer().then((buffer) => new Uint8Array(buffer));
+}
+
+function computeStats(data: Float32Array): VolumeStats {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+
+  for (let index = 0; index < data.length; index += 1) {
+    const value = data[index] ?? 0;
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+
+  const maxAbs = Math.max(Math.abs(min), Math.abs(max));
+  return { min, max, maxAbs };
+}
+
+function volumeIndex(
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  z: number,
+): number {
+  return x + width * (y + height * z);
+}
+
+function scalarToRgba(value: number, windowAbs: number): [number, number, number, number] {
+  const normalized = clamp01((value + windowAbs) / (windowAbs * 2 || 1));
+  const signed = windowAbs <= 0 ? 0 : clamp01(Math.abs(value) / windowAbs);
+
+  if (value < 0) {
+    return [
+      Math.round(245 - 30 * normalized),
+      Math.round(101 + 110 * (1 - signed)),
+      Math.round(60 + 45 * (1 - signed)),
+      212,
+    ];
+  }
+
+  return [
+    Math.round(55 + 80 * (1 - signed)),
+    Math.round(145 + 80 * (1 - signed)),
+    Math.round(240 - 35 * normalized),
+    212,
+  ];
+}
+
+function buildSliceTexture(
+  volume: NrrdVolume<Float32Array>,
+  axis: SliceAxis,
+  sliceIndex: number,
+  windowAbs: number,
+): { texture: Texture; physicalWidth: number; physicalHeight: number; position: [number, number, number]; rotation: [number, number, number] } {
+  const {
+    data,
+    metadata: {
+      dimensions: { width, height, depth },
+      spacing,
+      origin,
+    },
+  } = volume;
+
+  let textureWidth = 1;
+  let textureHeight = 1;
+  let physicalWidth = 1;
+  let physicalHeight = 1;
+  let position: [number, number, number] = [0, 0, 0];
+  let rotation: [number, number, number] = [0, 0, 0];
+
+  if (axis === "z") {
+    textureWidth = width;
+    textureHeight = height;
+    physicalWidth = Math.max(spacing.xStep, Math.abs(spacing.xStep) * (width - 1));
+    physicalHeight = Math.max(spacing.yStep, Math.abs(spacing.yStep) * (height - 1));
+    position = [
+      origin.x + (width - 1) * spacing.xStep * 0.5,
+      origin.y + (height - 1) * spacing.yStep * 0.5,
+      origin.z + sliceIndex * spacing.zStep,
+    ];
+  } else if (axis === "y") {
+    textureWidth = width;
+    textureHeight = depth;
+    physicalWidth = Math.max(spacing.xStep, Math.abs(spacing.xStep) * (width - 1));
+    physicalHeight = Math.max(spacing.zStep, Math.abs(spacing.zStep) * (depth - 1));
+    position = [
+      origin.x + (width - 1) * spacing.xStep * 0.5,
+      origin.y + sliceIndex * spacing.yStep,
+      origin.z + (depth - 1) * spacing.zStep * 0.5,
+    ];
+    rotation = [Math.PI / 2, 0, 0];
+  } else {
+    textureWidth = height;
+    textureHeight = depth;
+    physicalWidth = Math.max(spacing.yStep, Math.abs(spacing.yStep) * (height - 1));
+    physicalHeight = Math.max(spacing.zStep, Math.abs(spacing.zStep) * (depth - 1));
+    position = [
+      origin.x + sliceIndex * spacing.xStep,
+      origin.y + (height - 1) * spacing.yStep * 0.5,
+      origin.z + (depth - 1) * spacing.zStep * 0.5,
+    ];
+    rotation = [0, Math.PI / 2, 0];
+  }
+
+  const rgba = new Uint8Array(textureWidth * textureHeight * 4);
+
+  for (let row = 0; row < textureHeight; row += 1) {
+    for (let column = 0; column < textureWidth; column += 1) {
+      const x = axis === "x" ? sliceIndex : column;
+      const y = axis === "z" ? row : axis === "y" ? sliceIndex : column;
+      const z = axis === "z" ? sliceIndex : row;
+      const value = data[volumeIndex(width, height, x, y, z)] ?? 0;
+      const [r, g, b, a] = scalarToRgba(value, windowAbs);
+      const offset = (column + textureWidth * (textureHeight - 1 - row)) * 4;
+      rgba[offset] = r;
+      rgba[offset + 1] = g;
+      rgba[offset + 2] = b;
+      rgba[offset + 3] = a;
+    }
+  }
+
+  const texture = new DataTexture(rgba, textureWidth, textureHeight);
+  texture.minFilter = LinearFilter;
+  texture.magFilter = LinearFilter;
+  texture.wrapS = ClampToEdgeWrapping;
+  texture.wrapT = ClampToEdgeWrapping;
+  texture.needsUpdate = true;
+
+  return {
+    texture,
+    physicalWidth,
+    physicalHeight,
+    position,
+    rotation,
+  };
+}
+
+function buildSurfacePointCloud(
+  volume: NrrdVolume<Float32Array>,
+  isoThreshold: number,
+): SurfacePointCloud {
+  const {
+    data,
+    metadata: {
+      dimensions: { width, height, depth },
+      spacing,
+      origin,
+    },
+  } = volume;
+
+  const stride = Math.max(
+    1,
+    Math.ceil(Math.cbrt((width * height * depth) / SURFACE_POINT_LIMIT)),
+  );
+  const points: number[] = [];
+  const colors: number[] = [];
+
+  for (let z = 0; z < depth; z += stride) {
+    for (let y = 0; y < height; y += stride) {
+      for (let x = 0; x < width; x += stride) {
+        const value = data[volumeIndex(width, height, x, y, z)] ?? 0;
+        if (Math.abs(value) > isoThreshold) {
+          continue;
+        }
+        points.push(
+          origin.x + x * spacing.xStep,
+          origin.y + y * spacing.yStep,
+          origin.z + z * spacing.zStep,
+        );
+
+        if (value < 0) {
+          colors.push(0.98, 0.56, 0.28);
+        } else {
+          colors.push(0.38, 0.78, 0.96);
+        }
+      }
+    }
+  }
+
+  return {
+    positions: new Float32Array(points),
+    colors: new Float32Array(colors),
+    count: points.length / 3,
+  };
+}
+
+function AxisSlice(props: {
+  readonly volume: NrrdVolume<Float32Array>;
+  readonly axis: SliceAxis;
+  readonly sliceIndex: number;
+  readonly windowAbs: number;
+}) {
+  const slice = useMemo(
+    () => buildSliceTexture(props.volume, props.axis, props.sliceIndex, props.windowAbs),
+    [props.axis, props.sliceIndex, props.volume, props.windowAbs],
+  );
+
+  useEffect(() => () => slice.texture.dispose(), [slice.texture]);
+
+  return (
+    <mesh position={slice.position} rotation={slice.rotation}>
+      <planeGeometry args={[slice.physicalWidth, slice.physicalHeight]} />
+      <meshBasicMaterial map={slice.texture} transparent opacity={0.72} side={DoubleSide} />
+    </mesh>
+  );
+}
+
+function VolumeBounds(props: { readonly volume: NrrdVolume<Float32Array> }) {
+  const {
+    metadata: {
+      dimensions: { width, height, depth },
+      spacing,
+      origin,
+    },
+  } = props.volume;
+  const sizeX = Math.abs(spacing.xStep) * Math.max(1, width - 1);
+  const sizeY = Math.abs(spacing.yStep) * Math.max(1, height - 1);
+  const sizeZ = Math.abs(spacing.zStep) * Math.max(1, depth - 1);
+  const center: [number, number, number] = [
+    origin.x + (width - 1) * spacing.xStep * 0.5,
+    origin.y + (height - 1) * spacing.yStep * 0.5,
+    origin.z + (depth - 1) * spacing.zStep * 0.5,
+  ];
+
+  return (
+    <mesh position={center}>
+      <boxGeometry args={[sizeX, sizeY, sizeZ]} />
+      <meshBasicMaterial color="#1c1917" wireframe transparent opacity={0.16} />
+    </mesh>
+  );
+}
+
+function SurfacePoints(props: { readonly cloud: SurfacePointCloud }) {
+  return (
+    <points>
+      <bufferGeometry>
+        <bufferAttribute
+          attach="attributes-position"
+          args={[props.cloud.positions, 3]}
+          count={props.cloud.count}
+          itemSize={3}
+        />
+        <bufferAttribute
+          attach="attributes-color"
+          args={[props.cloud.colors, 3]}
+          count={props.cloud.count}
+          itemSize={3}
+        />
+      </bufferGeometry>
+      <pointsMaterial size={2.8} sizeAttenuation vertexColors transparent opacity={0.78} />
+    </points>
+  );
+}
+
+function VolumeScene(props: {
+  readonly volume: NrrdVolume<Float32Array>;
+  readonly xSlice: number;
+  readonly ySlice: number;
+  readonly zSlice: number;
+  readonly windowAbs: number;
+  readonly isoThreshold: number;
+  readonly deps: R3fDeps;
+}) {
+  const { Canvas, OrbitControls } = props.deps;
+  const cloud = useMemo(
+    () => buildSurfacePointCloud(props.volume, props.isoThreshold),
+    [props.isoThreshold, props.volume],
+  );
+
+  return (
+    <Canvas camera={{ position: [180, -280, 210], fov: 36 }}>
+      <color attach="background" args={["#f4eee4"]} />
+      <group rotation={[-0.55, 0.22, 0.18]}>
+        <VolumeBounds volume={props.volume} />
+        <AxisSlice volume={props.volume} axis="x" sliceIndex={props.xSlice} windowAbs={props.windowAbs} />
+        <AxisSlice volume={props.volume} axis="y" sliceIndex={props.ySlice} windowAbs={props.windowAbs} />
+        <AxisSlice volume={props.volume} axis="z" sliceIndex={props.zSlice} windowAbs={props.windowAbs} />
+        <SurfacePoints cloud={cloud} />
+      </group>
+      <OrbitControls enableDamping makeDefault />
+    </Canvas>
+  );
+}
+
+function MetaCard(props: { readonly label: string; readonly value: ReactNode }) {
+  return (
+    <div className="rounded-[1rem] bg-[#f7f1e5] px-3 py-2.5">
+      <div className="text-[10px] uppercase tracking-[0.15em] text-stone-500">{props.label}</div>
+      <div className="mt-1.5 break-words text-[0.92rem] font-semibold leading-5">{props.value}</div>
+    </div>
+  );
+}
+
+async function loadVolumeBytes(fileName: string, bytes: Uint8Array): Promise<LoadedVolume> {
+  return {
+    fileName,
+    fileSize: bytes.byteLength,
+    volume: parseNrrd(bytes),
+  };
+}
+
+function nextTick(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
+export default function NrrdRoute() {
+  const fileInputId = useId();
+  const [volume, setVolume] = useState<LoadedVolume | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [presets, setPresets] = useState<readonly NrrdPreset[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState("");
+  const [windowScale, setWindowScale] = useState(0.2);
+  const [surfaceScale, setSurfaceScale] = useState(0.03);
+  const [xSlice, setXSlice] = useState(0);
+  const [ySlice, setYSlice] = useState(0);
+  const [zSlice, setZSlice] = useState(0);
+  const [r3fDeps, setR3fDeps] = useState<R3fDeps | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadR3fDeps() {
+      const [{ Canvas }, { OrbitControls }] = await Promise.all([
+        import("@react-three/fiber"),
+        import("@react-three/drei"),
+      ]);
+      if (!cancelled) {
+        setR3fDeps({ Canvas, OrbitControls });
+      }
+    }
+
+    void loadR3fDeps();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPresets() {
+      try {
+        const response = await fetch("/api/nrrd-presets");
+        if (!response.ok) {
+          throw new Error(`Failed to load presets: ${response.status}`);
+        }
+        const payload = (await response.json()) as { presets?: NrrdPreset[] };
+        if (!cancelled) {
+          setPresets(payload.presets ?? []);
+        }
+      } catch {
+        if (!cancelled) {
+          setPresets([]);
+        }
+      }
+    }
+
+    void loadPresets();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const stats = useMemo(
+    () => (volume ? computeStats(volume.volume.data) : null),
+    [volume],
+  );
+
+  const windowAbs = (stats?.maxAbs ?? 1) * Math.max(0.0001, windowScale);
+  const isoThreshold = (stats?.maxAbs ?? 1) * Math.max(0.0005, surfaceScale);
+
+  useEffect(() => {
+    if (!volume) {
+      return;
+    }
+    startTransition(() => {
+      setXSlice(Math.floor(volume.volume.metadata.dimensions.width / 2));
+      setYSlice(Math.floor(volume.volume.metadata.dimensions.height / 2));
+      setZSlice(Math.floor(volume.volume.metadata.dimensions.depth / 2));
+    });
+  }, [volume]);
+
+  async function loadFromFile(file: File) {
+    setIsBusy(true);
+    setError(null);
+    startTransition(() => {
+      setVolume(null);
+      setSelectedPreset("");
+    });
+    await nextTick();
+
+    try {
+      const bytes = await loadFileBytes(file);
+      const loaded = await loadVolumeBytes(file.name, bytes);
+
+      startTransition(() => {
+        setVolume(loaded);
+        setSelectedPreset("");
+      });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Unknown NRRD parse error";
+      startTransition(() => {
+        setVolume(null);
+        setError(message);
+      });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function loadPreset(nextPath: string) {
+    const preset = presets.find((entry) => entry.path === nextPath);
+    if (!preset) {
+      return;
+    }
+
+    setIsBusy(true);
+    setError(null);
+    startTransition(() => {
+      setVolume(null);
+    });
+    await nextTick();
+
+    try {
+      const response = await fetch(`/api/nrrd-presets/file?path=${encodeURIComponent(preset.path)}`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch preset: ${response.status}`);
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const loaded = await loadVolumeBytes(preset.fileName, bytes);
+
+      startTransition(() => {
+        setVolume(loaded);
+        setSelectedPreset(preset.path);
+      });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Unknown NRRD preset error";
+      startTransition(() => {
+        setError(message);
+      });
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  const dims = volume?.volume.metadata.dimensions;
+
+  return (
+    <>
+      <Head>
+        <title>NRRD Viewer</title>
+      </Head>
+      <main className="min-h-screen text-stone-900">
+        <div className="pointer-events-none fixed inset-0 opacity-70">
+          <div className="absolute left-[-10%] top-[-8%] h-[28rem] w-[28rem] rounded-full bg-[#f97316]/18 blur-3xl" />
+          <div className="absolute bottom-[-12%] right-[-6%] h-[26rem] w-[26rem] rounded-full bg-[#0f766e]/18 blur-3xl" />
+        </div>
+
+        <div className="relative mx-auto flex min-h-screen max-w-[96rem] flex-col gap-5 px-4 py-5 lg:px-6">
+          <header className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_24rem]">
+            <section className="rounded-[1.6rem] border border-black/8 bg-[#13110f] px-5 py-5 text-stone-50 shadow-[0_24px_70px_rgba(40,24,10,0.18)]">
+              <div className="mb-3 inline-flex rounded-full border border-white/12 bg-white/8 px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-orange-200">
+                /nrrd
+              </div>
+              <h1 className="max-w-3xl text-3xl font-semibold tracking-[-0.04em] sm:text-4xl">
+                Inspect a
+                <span className="block text-[#fdba74]">3D NRRD volume</span>
+              </h1>
+              <p className="mt-3 max-w-2xl text-sm leading-6 text-stone-300">
+                Open the generated SDF volumes from `icc2sdf`, scrub three orthogonal slices, and orbit the volume in 3D with react-three-fiber.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Link className="inline-flex rounded-full border border-white/14 px-4 py-2 text-sm text-stone-100 no-underline transition hover:bg-white/8" href="/">
+                  Back to index
+                </Link>
+                <Link className="inline-flex rounded-full border border-white/14 px-4 py-2 text-sm text-stone-100 no-underline transition hover:bg-white/8" href="/icc">
+                  Open ICC inspector
+                </Link>
+              </div>
+            </section>
+
+            <div
+              className="group flex min-h-[220px] cursor-pointer flex-col justify-between rounded-[1.6rem] border border-dashed border-black/15 bg-white/70 p-5 shadow-[0_18px_40px_rgba(88,65,34,0.1)] backdrop-blur"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                const file = event.dataTransfer.files[0];
+                if (file) void loadFromFile(file);
+              }}
+            >
+              <div>
+                <span className="inline-flex rounded-full bg-stone-900 px-3 py-1 text-xs font-medium uppercase tracking-[0.18em] text-stone-100">
+                  Drop .nrrd
+                </span>
+                <div className="mt-3 text-xl font-semibold tracking-[-0.03em] text-stone-900">Open a NRRD volume</div>
+                <p className="mt-1 text-sm leading-6 text-stone-600">
+                  Load a local volume or choose a preset generated from `icc-profiles`.
+                </p>
+                <div className="mt-4 rounded-[1rem] border border-black/8 bg-white/70 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-3 text-[11px] uppercase tracking-[0.16em] text-stone-500">
+                    <span>Preset Volumes</span>
+                    <span>{presets.length}</span>
+                  </div>
+                  <select
+                    className="w-full rounded-xl border border-black/12 bg-white px-3 py-2.5 text-sm outline-none focus:border-teal-700/55 focus:shadow-[0_0_0_4px_rgba(15,118,110,0.11)]"
+                    value={selectedPreset}
+                    onChange={(event) => {
+                      const next = event.target.value;
+                      setSelectedPreset(next);
+                      if (next) {
+                        void loadPreset(next);
+                      }
+                    }}
+                  >
+                    <option value="">Choose from icc2sdf/tmp...</option>
+                    {presets.map((preset) => (
+                      <option key={preset.path} value={preset.path}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="flex items-center justify-between rounded-[1rem] bg-stone-900 px-4 py-3 text-sm text-stone-100 transition group-hover:bg-[#0f766e]">
+                <label
+                  className="cursor-pointer rounded-full border border-white/12 px-3 py-1.5 text-xs font-medium uppercase tracking-[0.16em] text-stone-50 transition hover:bg-white/8"
+                  htmlFor={fileInputId}
+                >
+                  {isBusy ? "Loading..." : "Choose volume"}
+                </label>
+                <span className="max-w-[12rem] truncate text-stone-300">{volume ? volume.fileName : "No file loaded"}</span>
+              </div>
+              <input
+                id={fileInputId}
+                className="hidden"
+                type="file"
+                accept=".nrrd,application/octet-stream"
+                onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                  const file = event.target.files?.[0];
+                  if (file) void loadFromFile(file);
+                }}
+              />
+            </div>
+          </header>
+
+          {error ? (
+            <section className="rounded-[1.6rem] border border-red-900/15 bg-red-50 px-5 py-4 text-sm text-red-900">
+              Parse failed: {error}
+            </section>
+          ) : null}
+
+          {volume && stats ? (
+            <>
+              <section className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+                <div className="overflow-hidden rounded-[1.4rem] border border-black/8 bg-[rgba(255,252,246,0.84)] shadow-[0_16px_36px_rgba(70,48,22,0.08)] backdrop-blur">
+                  <div className="flex items-baseline justify-between gap-4 border-b border-black/8 px-4 py-3">
+                    <h2>Volume View</h2>
+                    <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">
+                      {dims?.width} × {dims?.height} × {dims?.depth}
+                    </span>
+                  </div>
+                  <div className="h-[38rem]">
+                    {r3fDeps ? (
+                      <VolumeScene
+                        volume={volume.volume}
+                        xSlice={xSlice}
+                        ySlice={ySlice}
+                        zSlice={zSlice}
+                        windowAbs={windowAbs}
+                        isoThreshold={isoThreshold}
+                        deps={r3fDeps}
+                      />
+                    ) : (
+                      <div className="grid h-full place-items-center text-sm text-stone-500">
+                        Loading 3D viewer...
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid gap-4">
+                  <section className="rounded-[1.4rem] border border-black/8 bg-[rgba(255,252,246,0.84)] p-4 shadow-[0_16px_36px_rgba(70,48,22,0.08)] backdrop-blur">
+                    <div className="mb-3 flex items-baseline justify-between gap-4">
+                      <h2>Volume Overview</h2>
+                      <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">Metadata</span>
+                    </div>
+                    <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">
+                      <MetaCard label="File" value={volume.fileName} />
+                      <MetaCard label="Size" value={formatBytes(volume.fileSize)} />
+                      <MetaCard label="Dimensions" value={`${dims?.width} × ${dims?.height} × ${dims?.depth}`} />
+                      <MetaCard
+                        label="Spacing"
+                        value={`${volume.volume.metadata.spacing.xStep.toFixed(2)} / ${volume.volume.metadata.spacing.yStep.toFixed(2)} / ${volume.volume.metadata.spacing.zStep.toFixed(2)}`}
+                      />
+                      <MetaCard
+                        label="Origin"
+                        value={`${volume.volume.metadata.origin.x.toFixed(1)}, ${volume.volume.metadata.origin.y.toFixed(1)}, ${volume.volume.metadata.origin.z.toFixed(1)}`}
+                      />
+                      <MetaCard label="Range" value={`${stats.min.toFixed(3)} .. ${stats.max.toFixed(3)}`} />
+                    </div>
+                  </section>
+
+                  <section className="rounded-[1.4rem] border border-black/8 bg-[rgba(255,252,246,0.84)] p-4 shadow-[0_16px_36px_rgba(70,48,22,0.08)] backdrop-blur">
+                    <div className="mb-3 flex items-baseline justify-between gap-4">
+                      <h2>Slice Controls</h2>
+                      <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">Three axes</span>
+                    </div>
+                    <div className="grid gap-3">
+                      <label className="grid gap-1.5 text-sm text-stone-700">
+                        <span>L slice ({xSlice})</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={Math.max(0, (dims?.width ?? 1) - 1)}
+                          value={xSlice}
+                          onChange={(event) => setXSlice(Number(event.target.value))}
+                        />
+                      </label>
+                      <label className="grid gap-1.5 text-sm text-stone-700">
+                        <span>a slice ({ySlice})</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={Math.max(0, (dims?.height ?? 1) - 1)}
+                          value={ySlice}
+                          onChange={(event) => setYSlice(Number(event.target.value))}
+                        />
+                      </label>
+                      <label className="grid gap-1.5 text-sm text-stone-700">
+                        <span>b slice ({zSlice})</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={Math.max(0, (dims?.depth ?? 1) - 1)}
+                          value={zSlice}
+                          onChange={(event) => setZSlice(Number(event.target.value))}
+                        />
+                      </label>
+                    </div>
+                  </section>
+
+                  <section className="rounded-[1.4rem] border border-black/8 bg-[rgba(255,252,246,0.84)] p-4 shadow-[0_16px_36px_rgba(70,48,22,0.08)] backdrop-blur">
+                    <div className="mb-3 flex items-baseline justify-between gap-4">
+                      <h2>Display Controls</h2>
+                      <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">Window and surface</span>
+                    </div>
+                    <div className="grid gap-3">
+                      <label className="grid gap-1.5 text-sm text-stone-700">
+                        <span>Slice window ({windowAbs.toFixed(2)})</span>
+                        <input
+                          type="range"
+                          min={0.01}
+                          max={1}
+                          step={0.01}
+                          value={windowScale}
+                          onChange={(event) => setWindowScale(Number(event.target.value))}
+                        />
+                      </label>
+                      <label className="grid gap-1.5 text-sm text-stone-700">
+                        <span>Near-surface threshold ({isoThreshold.toFixed(2)})</span>
+                        <input
+                          type="range"
+                          min={0.002}
+                          max={0.2}
+                          step={0.002}
+                          value={surfaceScale}
+                          onChange={(event) => setSurfaceScale(Number(event.target.value))}
+                        />
+                      </label>
+                    </div>
+                  </section>
+                </div>
+              </section>
+            </>
+          ) : (
+            <section className="grid min-h-[220px] place-items-center rounded-[1.4rem] border border-black/8 bg-[rgba(255,252,246,0.84)] p-5 text-center leading-7 text-stone-600 shadow-[0_16px_36px_rgba(70,48,22,0.08)] backdrop-blur">
+              <div>
+                No NRRD volume is loaded yet. Choose a generated SDF preset or upload a local `.nrrd` file to inspect it in 3D.
+              </div>
+            </section>
+          )}
+        </div>
+      </main>
+    </>
+  );
+}

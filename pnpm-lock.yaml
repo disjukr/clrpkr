@@ -17,6 +17,9 @@ importers:
       lcms-ts:
         specifier: workspace:*
         version: link:../lcms-ts
+      webgpu:
+        specifier: ^0.3.8
+        version: 0.3.8
     devDependencies:
       '@webgpu/types':
         specifier: ^0.1.66
@@ -42,6 +45,9 @@ importers:
       '@react-three/fiber':
         specifier: ^9.5.0
         version: 9.5.0(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(three@0.183.2)
+      icc2sdf:
+        specifier: workspace:*
+        version: link:../icc2sdf
       lcms-ts:
         specifier: workspace:*
         version: link:../lcms-ts
@@ -67,6 +73,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.1.9
         version: 19.2.3(@types/react@19.2.14)
+      '@types/three':
+        specifier: ^0.183.0
+        version: 0.183.1
       '@unocss/preset-icons':
         specifier: ^66.6.6
         version: 66.6.6
@@ -1888,6 +1897,9 @@ packages:
   webgl-sdf-generator@1.1.1:
     resolution: {integrity: sha512-9Z0JcMTFxeE+b2x1LJTdnaT8rT8aEp7MVxkNwoycNmJWwPdzoXzMh0BjJSh/AEFP+KPYZUli814h8bJZFIZ2jA==}
 
+  webgpu@0.3.8:
+    resolution: {integrity: sha512-g2YwfCvzHoQHwSEY3fS95sVKdo/JVLL9AnicJyRQBPwWm4j7zISHvk6P85HaWP0LhtBV+aopsShKIaDi4smECg==}
+
   webpack-virtual-modules@0.6.2:
     resolution: {integrity: sha512-66/V2i5hQanC51vBQKPH4aI8NMAcBW59FVBs+rC7eGHupMyfn34q7rZIE+ETlJ+XTevqfUhVVBgSUNSW2flEUQ==}
 
@@ -3608,6 +3620,13 @@ snapshots:
   webgl-constants@1.1.1: {}
 
   webgl-sdf-generator@1.1.1: {}
+
+  webgpu@0.3.8:
+    dependencies:
+      '@webgpu/types': 0.1.69
+      debug: 4.4.3
+    transitivePeerDependencies:
+      - supports-color
 
   webpack-virtual-modules@0.6.2: {}
 

@@ -5,11 +5,6 @@ import { resolve } from "node:path";
 
 export default defineConfig({
   plugins: [vinext(), normalizeVinextWindowsPaths(), UnoCSS()],
-  resolve: {
-    alias: {
-      "lcms-ts": resolve(__dirname, "../lcms-ts/dist/src/index.js"),
-    },
-  },
   server: {
     fs: {
       allow: [resolve(__dirname, "..")],
