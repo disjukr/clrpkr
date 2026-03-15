@@ -206,12 +206,18 @@ export function serializeIccTagValue(
 export interface CmsSerializedTagRecord {
   readonly signature: string;
   readonly payload: Uint8Array;
+  readonly payloadKey?: string;
 }
 
-export function serializeIccTagRecord(signature: string, value: Parameters<typeof serializeIccTagValue>[0]): CmsSerializedTagRecord {
+export function serializeIccTagRecord(
+  signature: string,
+  value: Parameters<typeof serializeIccTagValue>[0],
+  payloadKey?: string,
+): CmsSerializedTagRecord {
   return {
     signature,
     payload: serializeIccTagValue(value),
+    ...(payloadKey ? { payloadKey } : {}),
   };
 }
 
@@ -224,14 +230,29 @@ export function buildSerializedTagTable(
   readonly entries: readonly { signature: string; offset: number; size: number }[];
 } {
   const entries: { signature: string; offset: number; size: number }[] = [];
+  const payloadOffsets = new Map<string, { offset: number; size: number }>();
   let offset = payloadOffset;
 
   for (const record of records) {
-    entries.push({
+    const key = record.payloadKey ?? `unique:${entries.length}`;
+    const shared = payloadOffsets.get(key);
+
+    if (shared) {
+      entries.push({
+        signature: record.signature,
+        offset: shared.offset,
+        size: shared.size,
+      });
+      continue;
+    }
+
+    const entry = {
       signature: record.signature,
       offset,
       size: record.payload.byteLength,
-    });
+    };
+    entries.push(entry);
+    payloadOffsets.set(key, { offset: entry.offset, size: entry.size });
     offset = align4(offset + record.payload.byteLength);
   }
 
@@ -246,6 +267,9 @@ export function buildSerializedTagTable(
     writeSignature(tagTable, tableOffset, entry.signature);
     writeU32(tagTable, tableOffset + 4, entry.offset);
     writeU32(tagTable, tableOffset + 8, entry.size);
+    if (payloadBytes.slice(payloadWriteOffset, payloadWriteOffset + record.payload.byteLength).some((value) => value !== 0)) {
+      continue;
+    }
     payloadBytes.set(record.payload, payloadWriteOffset);
   }
 
