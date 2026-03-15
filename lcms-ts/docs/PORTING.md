@@ -16,15 +16,15 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
 - `src/profile/io-base.ts` now centralizes low-level big-endian ICC reads/writes and the first header/tag-table serialization helpers.
 - `src/profile/io-tags.ts` now serializes the currently supported scalar and metadata tag payloads, including text/curve/LUT tags plus measurement, viewing, chromaticity, profile sequence, named color, dictionary, VCGT, video-signal, `MHC2`, UCR/BG, CRD info, screening, and array structures.
 - `src/profile/profile.ts` now assembles serialized headers, tag tables, and supported tag payloads into in-memory ICC profile bytes, plus a generic stream write helper and save-time profile ID recomputation.
-- `src/pipeline/index.ts` maps `mft1`, `mft2`, `mAB`, and `mBA` tags into an internal pipeline model and evaluates them in float mode with multilinear or tetrahedral interpolation, including structured parsing of `mAB`/`mBA` curve, matrix, and CLUT blocks.
+- `src/pipeline/index.ts` maps `mft1`, `mft2`, `mAB`, `mBA`, and `mpet` tags into an internal pipeline model and evaluates them in float mode with multilinear or tetrahedral interpolation, including structured parsing of `mAB`/`mBA` curve, matrix, and CLUT blocks plus named-color and Lab v2/v4 compatibility stages used by `cmsio1`.
 - `src/hash/md5.ts` now ports the MD5 path used for ICC profile ID computation.
 - `src/core/context.ts` defines the first context abstraction that can later absorb plugin and error handler state.
 
 ## Current status
 
 - `cmsmtrx`, `cmspcs`, `cmswtpnt`, `cmsgamma`, and `cmslut` are `bootstrapped` rather than `planned`.
-- `cmsio0` is now `in-progress` with shared binary I/O primitives plus initial serialization support for ICC headers and tag tables.
-- `cmsio1` is now `in-progress` with supported scalar/LUT tag serialization, intent-based LUT selection, devicelink lookup, float `DToB*` / `BToD*` tag selection, gray/RGB matrix-shaper fallbacks, and profile info lookup.
+- `cmsio0` is now effectively `done` for the current runtime-neutral scope: shared binary I/O primitives, raw/cooked tag handling, linked tags, ICC header/tag-table serialization, memory save/open, and generic stream save are in place.
+- `cmsio1` is now effectively `done` for the current scope: supported scalar/LUT tag serialization, intent-based LUT selection, devicelink lookup, float `DToB*` / `BToD*` tag selection, named-color pipeline selection, Lab v2/v4 compatibility stages, matrix-shaper fallbacks, and profile info lookup are in place.
 - `cmstypes` is now `in-progress` with a growing ICC tag payload subset:
   - scalar/text types: `desc`, `text`, `mluc`, `XYZ `, `curv`, `para`, `sig `, `data`, `dtim`
   - measurement/viewing types: `meas`, `view`, `chrm`
@@ -39,8 +39,8 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
   - LUT structure parsing for `mft1`, `mft2`, `mAB`, `mBA`
 - Pipeline execution is currently partial:
   - float evaluation only
-  - stage kinds: tone curves, generic matrix, 8-bit CLUT, 16-bit CLUT
-  - interpolation modes: multilinear and tetrahedral for 3-channel CLUTs
+  - stage kinds: tone curves, generic matrix, 8-bit CLUT, 16-bit CLUT, float CLUT, named-color, and Lab/XYZ normalization stages
+  - interpolation modes: multilinear and tetrahedral for 3-channel CLUTs, with Lab PCS LUT16 paths defaulting to multilinear like upstream `cmsio1`
 - Upstream oracle checks are available via `zig cc`:
   - `oracle/pipeline_oracle.c`
   - `scripts/build-pipeline-oracle.mjs`
@@ -61,9 +61,6 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
   - profile creation
   - tag write-back
   - full tag type coverage
-- `cmsio1` still has unported advanced paths:
-  - named-color devicelink support
-  - Lab v2/v4 normalization glue around pipelines
 - `cmstypes` still has notable gaps:
   - broader `multiProcessElementType` coverage beyond the current curve/matrix/CLUT subset
   - some less-common array/helper paths only indirectly covered through raw payload support

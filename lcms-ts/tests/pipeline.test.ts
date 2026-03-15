@@ -214,6 +214,27 @@ describe("pipeline mapping", () => {
     expect(reverse.every((value) => value >= 0 && value <= 1)).toBe(true);
   });
 
+  it("supports upstream matrix-shaper-only sentinel intent for input LUTs", () => {
+    const fullPath = path.join(repoRoot, "icc-profiles", "eci", "eciRGB_v2_ICCv4.icc");
+    const data = readFileSync(fullPath);
+    const header = parseIccHeader(data);
+    const tags = parseIccTagTable(data, header);
+    const profile = cmsCreateProfilePlaceholder(
+      header,
+      ["rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC"].map((signature) => {
+        const tag = tags.find((entry) => entry.signature === signature);
+        if (!tag) {
+          throw new Error(`Tag ${signature} not found`);
+        }
+        return { signature, value: parseIccTagValue(data, tag) };
+      }),
+    );
+
+    const pipeline = cmsReadInputLUT(profile, 0xffffffff);
+
+    expect(pipeline?.stages.map((stage) => stage.kind)).toEqual(["tone-curves", "matrix"]);
+  });
+
   it("builds gray fallback pipelines for gray matrix-shaper profiles", () => {
     const rgbPath = path.join(repoRoot, "icc-profiles", "eci/eciRGB_v2_ICCv4.icc");
     const rgbData = readFileSync(rgbPath);
@@ -438,7 +459,7 @@ describe("pipeline mapping", () => {
     const devicelink = cmsReadDevicelinkLUT(profile, 2);
 
     expect(devicelink?.stages[0]?.kind).toBe("matrix");
-    expect(devicelink?.stages.at(-1)?.kind).toBe("normalize-from-lab");
+    expect(devicelink?.stages.at(-1)?.kind).toBe("matrix");
   });
 
   it("uses multilinear interpolation by default for Lab PCS output lut16 pipelines", () => {
