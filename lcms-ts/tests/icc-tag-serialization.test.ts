@@ -59,6 +59,26 @@ function reparseSerialized(signature: string, value: Exclude<CmsParsedTagValue, 
 }
 
 describe("ICC tag serialization", () => {
+  function writeSignature(buffer: Uint8Array, offset: number, signature: string) {
+    for (let index = 0; index < 4; index += 1) {
+      buffer[offset + index] = signature.charCodeAt(index) ?? 0x20;
+    }
+  }
+
+  function writeU32(buffer: Uint8Array, offset: number, value: number) {
+    buffer[offset] = (value >>> 24) & 0xff;
+    buffer[offset + 1] = (value >>> 16) & 0xff;
+    buffer[offset + 2] = (value >>> 8) & 0xff;
+    buffer[offset + 3] = value & 0xff;
+  }
+
+  function writeU64(buffer: Uint8Array, offset: number, value: bigint) {
+    const high = Number((value >> 32n) & 0xffffffffn);
+    const low = Number(value & 0xffffffffn);
+    writeU32(buffer, offset, high);
+    writeU32(buffer, offset + 4, low);
+  }
+
   it("round-trips mluc and XYZ tags through serialization", () => {
     const { data, tags } = readProfile("color/sRGB_v4_ICC_preference.icc");
     const desc = parseOptionalIccTagValue(data, tags, "desc") as CmsMlucTagValue;
@@ -438,5 +458,52 @@ describe("ICC tag serialization", () => {
     };
 
     expect(reparseSerialized("pseq", pseq)).toEqual(pseq);
+  });
+
+  it("consumes full embedded desc payloads before parsing the next sequence field", () => {
+    const ascii = "Maker\0";
+    const unicode = "Maker\0";
+    const descSize = 108;
+    const textPayload = serializeIccTagValue({ kind: "text", text: "Model" });
+    const payload = new Uint8Array(12 + 20 + descSize + textPayload.byteLength);
+
+    writeSignature(payload, 0, "pseq");
+    writeU32(payload, 8, 1);
+    writeSignature(payload, 12, "TEST");
+    writeSignature(payload, 16, "MODL");
+    writeU64(payload, 20, 0n);
+    writeSignature(payload, 28, "CRT ");
+
+    const descOffset = 32;
+    writeSignature(payload, descOffset, "desc");
+    writeU32(payload, descOffset + 8, ascii.length);
+    for (let index = 0; index < ascii.length; index += 1) {
+      payload[descOffset + 12 + index] = ascii.charCodeAt(index);
+    }
+    writeU32(payload, descOffset + 18, 0);
+    writeU32(payload, descOffset + 22, unicode.length);
+    for (let index = 0; index < unicode.length; index += 1) {
+      const code = unicode.charCodeAt(index);
+      payload[descOffset + 26 + index * 2] = (code >>> 8) & 0xff;
+      payload[descOffset + 26 + index * 2 + 1] = code & 0xff;
+    }
+    payload[descOffset + 106] = 0;
+    payload[descOffset + 107] = 0;
+
+    payload.set(textPayload, descOffset + descSize);
+
+    expect(parseIccTagValue(payload, { signature: "pseq", offset: 0, size: payload.byteLength })).toEqual({
+      kind: "pseq",
+      entries: [
+        {
+          deviceMfg: "TEST",
+          deviceModel: "MODL",
+          attributes: 0n,
+          technology: "CRT ",
+          manufacturer: { kind: "desc", text: "Maker" },
+          model: { kind: "text", text: "Model" },
+        },
+      ],
+    });
   });
 });

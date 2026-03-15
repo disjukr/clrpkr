@@ -578,8 +578,7 @@ function parseEmbeddedTextTag(payload: Uint8Array, offset: number): { value: Cms
 
   switch (type) {
     case "desc": {
-      const asciiLength = readU32(payload, offset + 8);
-      const size = 12 + asciiLength;
+      const size = getEmbeddedDescTagSize(payload, offset);
       return {
         value: parseDescTag(payload.slice(offset, offset + size)),
         nextOffset: offset + size,
@@ -615,6 +614,31 @@ function parseEmbeddedTextTag(payload: Uint8Array, offset: number): { value: Cms
     default:
       throw new Error(`Unsupported embedded text type ${JSON.stringify(type)}`);
   }
+}
+
+function getEmbeddedDescTagSize(payload: Uint8Array, offset: number): number {
+  const asciiLength = readU32(payload, offset + 8);
+  let size = 12 + asciiLength;
+  const remaining = payload.byteLength - offset;
+
+  if (remaining < size + 8) {
+    return size;
+  }
+
+  const unicodeCount = readU32(payload, offset + size + 4);
+  size += 8;
+
+  if (unicodeCount > 0x7ffff || remaining < size + unicodeCount * 2) {
+    return size;
+  }
+
+  size += unicodeCount * 2;
+
+  if (remaining < size + 2 + 1 + 67) {
+    return size;
+  }
+
+  return align4(size + 2 + 1 + 67);
 }
 
 function findNextEmbeddedTextOffset(payload: Uint8Array, start: number): number | undefined {
