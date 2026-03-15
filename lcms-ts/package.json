@@ -1,0 +1,31 @@
+{
+  "name": "lcms-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript port foundation for Little CMS",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "fetch:upstream": "node ./scripts/fetch-upstream.mjs",
+    "oracle:build": "node ./scripts/build-pipeline-oracle.mjs",
+    "test:oracle": "node ./scripts/run-pipeline-oracle-checks.mjs",
+    "sync:api": "node ./scripts/sync-upstream-api.mjs"
+  },
+  "devDependencies": {
+    "typescript": "~5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
