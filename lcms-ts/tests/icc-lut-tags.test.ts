@@ -26,6 +26,32 @@ function loadProfile(relativePath: string) {
 }
 
 describe("ICC LUT tag parsing", () => {
+  function writeSignature(buffer: Uint8Array, offset: number, signature: string) {
+    for (let index = 0; index < 4; index += 1) {
+      buffer[offset + index] = signature.charCodeAt(index) ?? 0x20;
+    }
+  }
+
+  function writeU32(buffer: Uint8Array, offset: number, value: number) {
+    buffer[offset] = (value >>> 24) & 0xff;
+    buffer[offset + 1] = (value >>> 16) & 0xff;
+    buffer[offset + 2] = (value >>> 8) & 0xff;
+    buffer[offset + 3] = value & 0xff;
+  }
+
+  function writeU16(buffer: Uint8Array, offset: number, value: number) {
+    buffer[offset] = (value >>> 8) & 0xff;
+    buffer[offset + 1] = value & 0xff;
+  }
+
+  function createAlignedCurvePayload(gamma: number): Uint8Array {
+    const payload = new Uint8Array(16);
+    writeSignature(payload, 0, "curv");
+    writeU32(payload, 8, 1);
+    writeU16(payload, 12, Math.round(gamma * 256));
+    return payload;
+  }
+
   it("parses mAB and mBA tags from v4 profiles", () => {
     const { data, tags } = loadProfile("color/sRGB_v4_ICC_preference.icc");
     const a2b0 = tags.find((tag) => tag.signature === "A2B0");
@@ -218,5 +244,40 @@ describe("ICC LUT tag parsing", () => {
     expect(parsed.elements[0].signature).toBe("cvst");
     expect(parsed.elements[0].rawElement).toEqual(element);
     expect(serializeIccLutTag(parsed)).toEqual(payload);
+  });
+
+  it("parses asymmetric mBA curve sets with the correct channel arity", () => {
+    const bCurvePayload = createAlignedCurvePayload(1);
+    const mCurvePayload = createAlignedCurvePayload(1);
+    const aCurvePayload = createAlignedCurvePayload(1);
+    const bCurvesOffset = 32;
+    const mCurvesOffset = bCurvesOffset + bCurvePayload.byteLength * 3;
+    const aCurvesOffset = mCurvesOffset + mCurvePayload.byteLength * 3;
+    const payload = new Uint8Array(aCurvesOffset + aCurvePayload.byteLength * 4);
+
+    writeSignature(payload, 0, "mBA ");
+    payload[8] = 3;
+    payload[9] = 4;
+    writeU32(payload, 12, bCurvesOffset);
+    writeU32(payload, 20, mCurvesOffset);
+    writeU32(payload, 28, aCurvesOffset);
+
+    for (let index = 0; index < 3; index += 1) {
+      payload.set(bCurvePayload, bCurvesOffset + index * bCurvePayload.byteLength);
+      payload.set(mCurvePayload, mCurvesOffset + index * mCurvePayload.byteLength);
+    }
+    for (let index = 0; index < 4; index += 1) {
+      payload.set(aCurvePayload, aCurvesOffset + index * aCurvePayload.byteLength);
+    }
+
+    const parsed = parseIccLutTag(payload, { signature: "B2A0", offset: 0, size: payload.byteLength }) as CmsMultiProcessElementTagValue;
+
+    expect(parsed.kind).toBe("mBA");
+    expect(parsed.inputChannels).toBe(3);
+    expect(parsed.outputChannels).toBe(4);
+    expect(parsed.bCurves).toHaveLength(3);
+    expect(parsed.mCurves).toHaveLength(3);
+    expect(parsed.aCurves).toHaveLength(4);
+    expect(validateLutTagStructure(parsed, payload.byteLength)).toEqual([]);
   });
 });
