@@ -21,6 +21,7 @@ import type {
   CmsCurveTagValue,
   CmsCrdInfoTagValue,
   CmsChromaticityTagValue,
+  CmsColorantOrderTagValue,
   CmsColorantTableTagValue,
   CmsDataTagValue,
   CmsDateTimeTagValue,
@@ -40,6 +41,7 @@ import type {
   CmsScreeningTagValue,
   CmsSignatureTagValue,
   CmsTextTagValue,
+  CmsU16Fixed16ArrayTagValue,
   CmsUInt32ArrayTagValue,
   CmsUInt64ArrayTagValue,
   CmsUInt8ArrayTagValue,
@@ -497,6 +499,25 @@ function serializeS15Fixed16ArrayTag(value: CmsS15Fixed16ArrayTagValue): Uint8Ar
   return buffer;
 }
 
+function serializeU16Fixed16ArrayTag(value: CmsU16Fixed16ArrayTagValue): Uint8Array {
+  const buffer = new Uint8Array(8 + value.values.length * 4);
+  writeSignature(buffer, 0, "uf32");
+  for (let index = 0; index < value.values.length; index += 1) {
+    writeU32(buffer, 8 + index * 4, Math.max(0, Math.min(0xffffffff, Math.round(value.values[index]! * 65536))));
+  }
+  return buffer;
+}
+
+function serializeColorantOrderTag(value: CmsColorantOrderTagValue): Uint8Array {
+  const buffer = new Uint8Array(12 + value.colorants.length);
+  writeSignature(buffer, 0, "clro");
+  writeU32(buffer, 8, value.colorants.length);
+  for (let index = 0; index < value.colorants.length; index += 1) {
+    buffer[12 + index] = value.colorants[index] ?? 0;
+  }
+  return buffer;
+}
+
 function serializeUInt8ArrayTag(value: CmsUInt8ArrayTagValue): Uint8Array {
   const buffer = new Uint8Array(8 + value.values.byteLength);
   writeSignature(buffer, 0, "ui08");
@@ -680,6 +701,7 @@ export function serializeIccTagValue(
     | CmsCurveTagValue
     | CmsCrdInfoTagValue
     | CmsChromaticityTagValue
+    | CmsColorantOrderTagValue
     | CmsColorantTableTagValue
     | CmsDataTagValue
     | CmsDateTimeTagValue
@@ -700,6 +722,7 @@ export function serializeIccTagValue(
     | CmsScreeningTagValue
     | CmsSignatureTagValue
     | CmsTextTagValue
+    | CmsU16Fixed16ArrayTagValue
     | CmsUInt32ArrayTagValue
     | CmsUInt64ArrayTagValue
     | CmsUInt8ArrayTagValue
@@ -714,6 +737,8 @@ export function serializeIccTagValue(
       return serializeVideoSignalTag(value);
     case "chrm":
       return serializeChromaticityTag(value);
+    case "clro":
+      return serializeColorantOrderTag(value);
     case "clrt":
       return serializeColorantTableTag(value);
     case "desc":
@@ -754,6 +779,8 @@ export function serializeIccTagValue(
       return serializeProfileSequenceIdTag(value);
     case "sf32":
       return serializeS15Fixed16ArrayTag(value);
+    case "uf32":
+      return serializeU16Fixed16ArrayTag(value);
     case "scrn":
       return serializeScreeningTag(value);
     case "sig":
