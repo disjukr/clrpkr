@@ -84,7 +84,7 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     category: "profile-io",
     targetModule: "src/profile/io-tags.ts",
     status: "in-progress",
-    notes: "Supported tag payload serialization, profile info lookup, intent/LUT selection, devicelink lookup, and gray/RGB matrix-shaper fallbacks are in place; float and named-color paths remain.",
+    notes: "Supported tag payload serialization, profile info lookup, intent/LUT selection, devicelink lookup, and gray/RGB matrix-shaper fallbacks are in place; float LUT and named-color devicelink paths remain.",
   },
   {
     upstreamSource: "cmslut.c",
@@ -168,7 +168,7 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     category: "tag-types",
     targetModule: "src/profile/tag-types.ts",
     status: "in-progress",
-    notes: "Common ICC metadata/tag payload readers and writers are in place for scalar types, sequence types, and several printing-related tags; named colors, dictionaries, VCGT, and richer MPE paths remain.",
+    notes: "Common ICC metadata/tag payload readers and writers are in place for scalar, sequence, named-color, dictionary, VCGT, video-signal, MHC2, and several printing-related tags; richer MPE paths remain.",
   },
   {
     upstreamSource: "cmsvirt.c",

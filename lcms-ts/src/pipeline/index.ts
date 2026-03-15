@@ -18,13 +18,7 @@ import {
   type CmsMultiProcessElementTagValue,
 } from "../profile/lut.js";
 import type { CmsIccTagEntry } from "../profile/tag-table.js";
-import {
-  cmsBuildParametricToneCurve,
-  cmsReverseToneCurve,
-  cmsBuildTabulatedToneCurve16,
-  cmsEvalToneCurveFloat,
-  type CmsToneCurve,
-} from "../tone-curve/index.js";
+import { cmsBuildParametricToneCurve, cmsReverseToneCurve, cmsBuildTabulatedToneCurve16, cmsEvalToneCurveFloat, type CmsToneCurve } from "../tone-curve/index.js";
 import type { CmsCurveTagValue, CmsParsedTagValue, CmsXyzTagValue } from "../profile/tags.js";
 
 export type CmsPipelineStage =
@@ -73,23 +67,6 @@ function clampUnit(value: number): number {
     return 1;
   }
   return value;
-}
-
-function readSignature(data: Uint8Array, offset: number): string {
-  return String.fromCharCode(
-    data[offset]!,
-    data[offset + 1]!,
-    data[offset + 2]!,
-    data[offset + 3]!,
-  );
-}
-
-function readU16(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(offset, false);
-}
-
-function readS15Fixed16(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getInt32(offset, false) / 65536;
 }
 
 function isIdentityMatrix(flat: readonly number[]): boolean {
@@ -193,133 +170,52 @@ function buildPipelineFromLut8(tag: CmsLut8TagValue): CmsPipeline {
   };
 }
 
-function parseCurveBlockSet(payload: Uint8Array, offset: number, channels: number): readonly CmsToneCurve[] {
-  const curves: CmsToneCurve[] = [];
-  let cursor = offset;
-
-  for (let i = 0; i < channels; i += 1) {
-    const type = readSignature(payload, cursor);
-
-    if (type === "curv") {
-      const count = new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint32(cursor + 8, false);
-      if (count === 0) {
-        curves.push(cmsBuildParametricToneCurve(1, [1]));
-        cursor += 12;
-        continue;
-      }
-      if (count === 1) {
-        curves.push(cmsBuildParametricToneCurve(1, [readU16(payload, cursor + 12) / 256]));
-        cursor += 14;
-        continue;
-      }
-      const values = new Uint16Array(count);
-      for (let j = 0; j < count; j += 1) {
-        values[j] = readU16(payload, cursor + 12 + j * 2);
-      }
-      curves.push(cmsBuildTabulatedToneCurve16(count, values));
-      cursor += 12 + count * 2;
-      continue;
-    }
-
-    if (type === "para") {
-      const functionType = readU16(payload, cursor + 8);
-      const paramCount = [1, 3, 4, 5, 7][functionType];
-      if (paramCount === undefined) {
-        throw new Error(`Unsupported parametric curve function type ${functionType} in MPE curve block`);
-      }
-      const params: number[] = [];
-      for (let j = 0; j < paramCount; j += 1) {
-        params.push(readS15Fixed16(payload, cursor + 12 + j * 4));
-      }
-      curves.push(cmsBuildParametricToneCurve(functionType + 1, params));
-      cursor += 12 + paramCount * 4;
-      continue;
-    }
-
-    throw new Error(`Unsupported MPE curve block type ${JSON.stringify(type)}`);
-  }
-
-  return curves;
-}
-
-function parseMatrixStage(payload: Uint8Array, offset: number): CmsPipelineStage {
-  const values = Array.from({ length: 12 }, (_, index) => readS15Fixed16(payload, offset + index * 4));
+function matrixStageFromValues(matrix: readonly number[], offset: readonly number[]): CmsPipelineStage {
   return {
     kind: "matrix",
     rows: 3,
     cols: 3,
-    matrix: values.slice(0, 9),
-    offset: [values[9]!, values[10]!, values[11]!],
+    matrix,
+    offset,
   };
 }
 
-function parseClutStage(
-  payload: Uint8Array,
-  offset: number,
-  inputChannels: number,
-  outputChannels: number,
-): CmsPipelineStage {
-  const gridPoints = Array.from({ length: inputChannels }, (_, index) => payload[offset + index]!);
-  const precision = payload[offset + 16]!;
-  const pointCount = gridPoints.reduce((acc, value) => acc * value, 1);
-  const valueCount = pointCount * outputChannels;
-  const dataOffset = offset + 20;
-
-  if (precision === 1) {
-    return {
-      kind: "clut8",
-      inputChannels,
-      outputChannels,
-      gridPoints,
-      values: payload.slice(dataOffset, dataOffset + valueCount),
-    };
-  }
-
-  const values = new Uint16Array(valueCount);
-  for (let i = 0; i < valueCount; i += 1) {
-    values[i] = readU16(payload, dataOffset + i * 2);
-  }
-  return {
-    kind: "clut16",
-    inputChannels,
-    outputChannels,
-    gridPoints,
-    values,
-  };
-}
-
-function buildPipelineFromMpe(tag: CmsMultiProcessElementTagValue, payload: Uint8Array): CmsPipeline {
+function buildPipelineFromMpe(tag: CmsMultiProcessElementTagValue): CmsPipeline {
   const stages: CmsPipelineStage[] = [];
-  const curveChannels = tag.kind === "mAB" ? tag.outputChannels : tag.inputChannels;
-  const aCurveChannels = tag.kind === "mAB" ? tag.inputChannels : tag.outputChannels;
+  if (tag.bCurves && !curvesAreIdentity(tag.bCurves)) {
+    stages.push({ kind: "tone-curves", channels: tag.bCurves.length, curves: tag.bCurves });
+  }
 
-  if (tag.hasBcurves) {
-    const curves = parseCurveBlockSet(payload, tag.offsets.bCurves, curveChannels);
-    if (!curvesAreIdentity(curves)) {
-      stages.push({ kind: "tone-curves", channels: curveChannels, curves });
+  if (tag.matrixValues && tag.matrixOffsetValues) {
+    stages.push(matrixStageFromValues(tag.matrixValues, tag.matrixOffsetValues));
+  }
+
+  if (tag.mCurves && !curvesAreIdentity(tag.mCurves)) {
+    stages.push({ kind: "tone-curves", channels: tag.mCurves.length, curves: tag.mCurves });
+  }
+
+  if (tag.clutGridPoints && tag.clutValuesParsed) {
+    if (tag.clutValuesParsed instanceof Uint8Array) {
+      stages.push({
+        kind: "clut8",
+        inputChannels: tag.inputChannels,
+        outputChannels: tag.outputChannels,
+        gridPoints: tag.clutGridPoints,
+        values: tag.clutValuesParsed,
+      });
+    } else {
+      stages.push({
+        kind: "clut16",
+        inputChannels: tag.inputChannels,
+        outputChannels: tag.outputChannels,
+        gridPoints: tag.clutGridPoints,
+        values: tag.clutValuesParsed,
+      });
     }
   }
 
-  if (tag.hasMatrix) {
-    stages.push(parseMatrixStage(payload, tag.offsets.matrix));
-  }
-
-  if (tag.hasMcurves) {
-    const curves = parseCurveBlockSet(payload, tag.offsets.mCurves, curveChannels);
-    if (!curvesAreIdentity(curves)) {
-      stages.push({ kind: "tone-curves", channels: curveChannels, curves });
-    }
-  }
-
-  if (tag.hasClut) {
-    stages.push(parseClutStage(payload, tag.offsets.clut, tag.inputChannels, tag.outputChannels));
-  }
-
-  if (tag.hasAcurves) {
-    const curves = parseCurveBlockSet(payload, tag.offsets.aCurves, aCurveChannels);
-    if (!curvesAreIdentity(curves)) {
-      stages.push({ kind: "tone-curves", channels: aCurveChannels, curves });
-    }
+  if (tag.aCurves && !curvesAreIdentity(tag.aCurves)) {
+    stages.push({ kind: "tone-curves", channels: tag.aCurves.length, curves: tag.aCurves });
   }
 
   return {
@@ -337,15 +233,13 @@ export function buildPipelineFromParsedTag(tag: Extract<CmsParsedTagValue, CmsLu
       return buildPipelineFromLut8(tag);
     case "mAB":
     case "mBA":
-      return buildPipelineFromMpe(tag, tag.rawPayload);
+      return buildPipelineFromMpe(tag);
   }
 }
 
 export function buildPipelineFromTag(data: Uint8Array, tag: CmsIccTagEntry): CmsPipeline {
   const parsed = parseIccLutTag(data, tag);
-  return parsed.kind === "mAB" || parsed.kind === "mBA"
-    ? buildPipelineFromMpe(parsed, data.slice(tag.offset, tag.offset + tag.size))
-    : buildPipelineFromParsedTag(parsed);
+  return buildPipelineFromParsedTag(parsed);
 }
 
 function evaluateToneCurveStage(stage: Extract<CmsPipelineStage, { kind: "tone-curves" }>, input: readonly number[]): number[] {

@@ -14,9 +14,9 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
 - `src/tone-curve/index.ts` ports the current tone-curve subset from `cmsgamma.c`, including tabulated curves, several parametric curve types, evaluation, monotonicity checks, reverse curves, and gamma estimation.
 - `src/profile/header.ts`, `src/profile/tag-table.ts`, `src/profile/tags.ts`, and `src/profile/lut.ts` parse ICC headers, tag tables, common tag payloads, and LUT tag structures used by the checked-in corpus.
 - `src/profile/io-base.ts` now centralizes low-level big-endian ICC reads/writes and the first header/tag-table serialization helpers.
-- `src/profile/io-tags.ts` now serializes the currently supported scalar and metadata tag payloads, including text/curve/LUT tags plus measurement, viewing, chromaticity, profile sequence, UCR/BG, CRD info, and screening structures.
+- `src/profile/io-tags.ts` now serializes the currently supported scalar and metadata tag payloads, including text/curve/LUT tags plus measurement, viewing, chromaticity, profile sequence, named color, dictionary, VCGT, video-signal, `MHC2`, UCR/BG, CRD info, screening, and array structures.
 - `src/profile/profile.ts` now assembles serialized headers, tag tables, and supported tag payloads into in-memory ICC profile bytes, plus a generic stream write helper.
-- `src/pipeline/index.ts` maps `mft1`, `mft2`, `mAB`, and `mBA` tags into an internal pipeline model and evaluates them in float mode with multilinear or tetrahedral interpolation.
+- `src/pipeline/index.ts` maps `mft1`, `mft2`, `mAB`, and `mBA` tags into an internal pipeline model and evaluates them in float mode with multilinear or tetrahedral interpolation, including structured parsing of `mAB`/`mBA` curve, matrix, and CLUT blocks.
 - `src/core/context.ts` defines the first context abstraction that can later absorb plugin and error handler state.
 
 ## Current status
@@ -27,8 +27,9 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
 - `cmstypes` is now `in-progress` with a growing ICC tag payload subset:
   - scalar/text types: `desc`, `text`, `mluc`, `XYZ `, `curv`, `para`, `sig `, `data`, `dtim`
   - measurement/viewing types: `meas`, `view`, `chrm`
-  - table/sequence types: `clrt`, `pseq`, `psid`
-  - print-oriented types: `bfd `, `crdi`, `scrn`
+  - table/sequence types: `clrt`, `ncl2`, `pseq`, `psid`, `dict`, `vcgt`, `MHC2`
+  - print-oriented types: `bfd `, `crdi`, `scrn`, `cicp`
+  - generic array types: `sf32`, `ui08`, `ui32`, `ui64`
 - There is now a minimal profile-level serializer for the supported tag set, including memory and generic stream helpers, but filesystem adapters and MD5/profile ID regeneration are still missing.
 - ICC profile support is currently read-oriented:
   - header parsing
@@ -64,10 +65,8 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
   - named-color devicelink support
   - Lab v2/v4 normalization glue around pipelines
 - `cmstypes` still has notable gaps:
-  - `namedColor2Type`
-  - `dictType`
-  - `vcgtType`
   - broader `multiProcessElementType` coverage beyond the current curve/matrix/CLUT subset
+  - some less-common array/helper paths only indirectly covered through raw payload support
 - Transform creation and execution APIs are still missing:
   - profile linking
   - intent handling

@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  cmsBuildParametricToneCurve,
   cmsBuildTabulatedToneCurve16,
   buildSerializedTagTable,
   parseIccHeader,
@@ -18,15 +19,24 @@ import {
   type CmsCrdInfoTagValue,
   type CmsDataTagValue,
   type CmsDateTimeTagValue,
+  type CmsDictionaryTagValue,
   type CmsMeasurementTagValue,
+  type CmsMhc2TagValue,
   type CmsMlucTagValue,
+  type CmsNamedColorTagValue,
   type CmsParsedTagValue,
   type CmsProfileSequenceDescTagValue,
   type CmsProfileSequenceIdTagValue,
+  type CmsS15Fixed16ArrayTagValue,
   type CmsScreeningTagValue,
   type CmsSignatureTagValue,
   type CmsTextTagValue,
+  type CmsUInt32ArrayTagValue,
+  type CmsUInt64ArrayTagValue,
+  type CmsUInt8ArrayTagValue,
   type CmsUcrBgTagValue,
+  type CmsVcgtTagValue,
+  type CmsVideoSignalTagValue,
   type CmsViewingConditionsTagValue,
   type CmsXyzTagValue,
 } from "../src/index.js";
@@ -193,6 +203,74 @@ describe("ICC tag serialization", () => {
         { frequency: 75, screenAngle: 45, spotShape: 3 },
       ],
     };
+    const ncl2: CmsNamedColorTagValue = {
+      kind: "ncl2",
+      vendorFlag: 7,
+      prefix: "PFX-",
+      suffix: "-SFX",
+      entries: [
+        { name: "Red", pcs: [100, 200, 300], deviceCoords: [10, 20, 30, 40] },
+        { name: "Green", pcs: [400, 500, 600], deviceCoords: [50, 60, 70, 80] },
+      ],
+    };
+    const dict: CmsDictionaryTagValue = {
+      kind: "dict",
+      entries: [
+        { name: "author", value: "lcms-ts" },
+        {
+          name: "description",
+          value: "metadata",
+          displayName: { kind: "mluc", entries: [{ language: "en", country: "US", text: "Description" }] },
+          displayValue: { kind: "mluc", entries: [{ language: "ko", country: "KR", text: "메타데이터" }] },
+        },
+      ],
+    };
+    const sf32: CmsS15Fixed16ArrayTagValue = {
+      kind: "sf32",
+      values: [1.25, -0.5, 0.125],
+    };
+    const ui08: CmsUInt8ArrayTagValue = {
+      kind: "ui08",
+      values: new Uint8Array([1, 2, 3, 250]),
+    };
+    const ui32: CmsUInt32ArrayTagValue = {
+      kind: "ui32",
+      values: [1, 65536, 0xff00ff00],
+    };
+    const ui64: CmsUInt64ArrayTagValue = {
+      kind: "ui64",
+      values: [1n, 0x0011223344556677n],
+    };
+    const cicp: CmsVideoSignalTagValue = {
+      kind: "cicp",
+      colourPrimaries: 9,
+      transferCharacteristics: 16,
+      matrixCoefficients: 9,
+      videoFullRangeFlag: 1,
+    };
+    const vcgtFormula: CmsVcgtTagValue = {
+      kind: "vcgt",
+      storage: "formula",
+      curves: [
+        cmsBuildParametricToneCurve(5, [2.2, 1, 0, 0, 0, 0.01, 0]),
+        cmsBuildParametricToneCurve(5, [2.0, 1, 0, 0, 0, 0.02, 0]),
+        cmsBuildParametricToneCurve(5, [1.8, 1, 0, 0, 0, 0.03, 0]),
+      ],
+    };
+    const mhc2: CmsMhc2TagValue = {
+      kind: "MHC2",
+      curveEntries: 4,
+      minLuminance: 0.01,
+      peakLuminance: 250,
+      xyzToXyzMatrix: [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+      ],
+      redCurve: [0, 0.2, 0.6, 1],
+      greenCurve: [0, 0.25, 0.65, 1],
+      blueCurve: [0, 0.3, 0.7, 1],
+    };
 
     expect(reparseSerialized("tech", sig)).toEqual(sig);
     expect(reparseSerialized("clro", data)).toEqual(data);
@@ -251,5 +329,30 @@ describe("ICC tag serialization", () => {
     expect(reparsedScrn.channels[0]?.frequency).toBeCloseTo(scrn.channels[0]!.frequency, 4);
     expect(reparsedScrn.channels[0]?.screenAngle).toBeCloseTo(scrn.channels[0]!.screenAngle, 4);
     expect(reparsedScrn.channels[0]?.spotShape).toBe(scrn.channels[0]!.spotShape);
+
+    expect(reparseSerialized("ncl2", ncl2)).toEqual(ncl2);
+    expect(reparseSerialized("meta", dict)).toEqual(dict);
+    expect(reparseSerialized("arts", sf32)).toEqual(sf32);
+    expect(reparseSerialized("ui08", ui08)).toEqual(ui08);
+    expect(reparseSerialized("ui32", ui32)).toEqual(ui32);
+    expect(reparseSerialized("ui64", ui64)).toEqual(ui64);
+    expect(reparseSerialized("cicp", cicp)).toEqual(cicp);
+
+    const reparsedVcgt = reparseSerialized("vcgt", vcgtFormula) as CmsVcgtTagValue;
+    expect(reparsedVcgt.kind).toBe("vcgt");
+    expect(reparsedVcgt.storage).toBe("formula");
+    expect(reparsedVcgt.curves[0].parametricType).toBe(5);
+    expect(reparsedVcgt.curves[0].params?.[0]).toBeCloseTo(2.2, 4);
+    expect(reparsedVcgt.curves[1].params?.[5]).toBeCloseTo(0.02, 4);
+
+    const reparsedMhc2 = reparseSerialized("MHC2", mhc2) as CmsMhc2TagValue;
+    expect(reparsedMhc2.kind).toBe("MHC2");
+    expect(reparsedMhc2.curveEntries).toBe(mhc2.curveEntries);
+    expect(reparsedMhc2.minLuminance).toBeCloseTo(mhc2.minLuminance, 4);
+    expect(reparsedMhc2.peakLuminance).toBeCloseTo(mhc2.peakLuminance, 4);
+    expect(reparsedMhc2.xyzToXyzMatrix).toEqual(mhc2.xyzToXyzMatrix);
+    reparsedMhc2.redCurve.forEach((value, index) => expect(value).toBeCloseTo(mhc2.redCurve[index]!, 4));
+    reparsedMhc2.greenCurve.forEach((value, index) => expect(value).toBeCloseTo(mhc2.greenCurve[index]!, 4));
+    reparsedMhc2.blueCurve.forEach((value, index) => expect(value).toBeCloseTo(mhc2.blueCurve[index]!, 4));
   });
 });

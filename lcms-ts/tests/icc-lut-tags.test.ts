@@ -41,11 +41,16 @@ describe("ICC LUT tag parsing", () => {
     expect(parsedA2b0.hasBcurves).toBe(true);
     expect(parsedA2b0.hasClut).toBe(true);
     expect(parsedA2b0.clutGridPoints?.length).toBe(3);
+    expect(parsedA2b0.matrixValues).toHaveLength(9);
+    expect(parsedA2b0.matrixOffsetValues).toHaveLength(3);
+    expect(parsedA2b0.clutValuesParsed).toBeInstanceOf(Uint16Array);
     expect(validateLutTagStructure(parsedA2b0, a2b0!.size)).toEqual([]);
 
     expect(parsedB2a0.kind).toBe("mBA");
     expect(parsedB2a0.inputChannels).toBe(3);
     expect(parsedB2a0.outputChannels).toBe(3);
+    expect(parsedB2a0.bCurves?.length).toBe(3);
+    expect(parsedB2a0.aCurves?.length).toBe(3);
     expect(validateLutTagStructure(parsedB2a0, b2a0!.size)).toEqual([]);
   });
 

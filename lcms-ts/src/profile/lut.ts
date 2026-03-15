@@ -9,6 +9,7 @@ import {
   writeSignature,
   writeU16,
 } from "./io-base.js";
+import { cmsBuildParametricToneCurve, cmsBuildTabulatedToneCurve16, type CmsToneCurve } from "../tone-curve/index.js";
 
 export interface CmsLut16TagValue {
   readonly kind: "mft2";
@@ -53,6 +54,12 @@ export interface CmsMultiProcessElementTagValue {
   readonly hasAcurves: boolean;
   readonly clutGridPoints?: readonly number[];
   readonly clutPrecision?: number;
+  readonly bCurves?: readonly CmsToneCurve[];
+  readonly matrixValues?: readonly number[];
+  readonly matrixOffsetValues?: readonly number[];
+  readonly mCurves?: readonly CmsToneCurve[];
+  readonly clutValuesParsed?: Uint8Array | Uint16Array;
+  readonly aCurves?: readonly CmsToneCurve[];
 }
 
 export type CmsParsedLutTagValue = CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue;
@@ -67,6 +74,125 @@ function integerPow(base: number, exponent: number): number {
     result *= base;
   }
   return result;
+}
+
+function align4(value: number): number {
+  return (value + 3) & ~3;
+}
+
+function getParametricCurveParameterCount(functionType: number): number {
+  switch (functionType) {
+    case 0:
+      return 1;
+    case 1:
+      return 3;
+    case 2:
+      return 4;
+    case 3:
+      return 5;
+    case 4:
+      return 7;
+    default:
+      throw new Error(`Unsupported parametric curve function type: ${functionType}`);
+  }
+}
+
+function parseEmbeddedCurve(payload: Uint8Array, offset: number): { curve: CmsToneCurve; nextOffset: number } {
+  const type = readSignature(payload, offset);
+
+  if (type === "curv") {
+    const count = readU32(payload, offset + 8);
+    if (count === 0) {
+      return {
+        curve: cmsBuildParametricToneCurve(1, [1]),
+        nextOffset: align4(offset + 12),
+      };
+    }
+    if (count === 1) {
+      return {
+        curve: cmsBuildParametricToneCurve(1, [readU16(payload, offset + 12) / 256]),
+        nextOffset: align4(offset + 14),
+      };
+    }
+
+    const values = new Uint16Array(count);
+    for (let index = 0; index < count; index += 1) {
+      values[index] = readU16(payload, offset + 12 + index * 2);
+    }
+    return {
+      curve: cmsBuildTabulatedToneCurve16(count, values),
+      nextOffset: align4(offset + 12 + count * 2),
+    };
+  }
+
+  if (type === "para") {
+    const functionType = readU16(payload, offset + 8);
+    const paramCount = getParametricCurveParameterCount(functionType);
+    const params: number[] = [];
+    for (let index = 0; index < paramCount; index += 1) {
+      params.push(readS15Fixed16(payload, offset + 12 + index * 4));
+    }
+    return {
+      curve: cmsBuildParametricToneCurve(functionType + 1, params),
+      nextOffset: align4(offset + 12 + paramCount * 4),
+    };
+  }
+
+  throw new Error(`Unsupported embedded MPE curve type ${JSON.stringify(type)}`);
+}
+
+function parseCurveSet(payload: Uint8Array, offset: number, count: number): readonly CmsToneCurve[] {
+  const curves: CmsToneCurve[] = [];
+  let cursor = offset;
+  for (let index = 0; index < count; index += 1) {
+    const parsed = parseEmbeddedCurve(payload, cursor);
+    curves.push(parsed.curve);
+    cursor = parsed.nextOffset;
+  }
+  return curves;
+}
+
+function parseMatrixBlock(payload: Uint8Array, offset: number): { matrixValues: readonly number[]; offsetValues: readonly number[] } {
+  const values = Array.from({ length: 12 }, (_, index) => readS15Fixed16(payload, offset + index * 4));
+  return {
+    matrixValues: values.slice(0, 9),
+    offsetValues: values.slice(9, 12),
+  };
+}
+
+function parseClutBlock(
+  payload: Uint8Array,
+  offset: number,
+  inputChannels: number,
+  outputChannels: number,
+): { gridPoints: readonly number[]; precision: number; values: Uint8Array | Uint16Array } {
+  const gridPoints = Array.from({ length: inputChannels }, (_, index) => readU8(payload, offset + index));
+  const precision = readU8(payload, offset + 16);
+  const pointCount = gridPoints.reduce((acc, value) => acc * value, 1);
+  const valueCount = pointCount * outputChannels;
+  const dataOffset = offset + 20;
+
+  if (precision === 1) {
+    return {
+      gridPoints,
+      precision,
+      values: payload.slice(dataOffset, dataOffset + valueCount),
+    };
+  }
+
+  if (precision === 2) {
+    const values = new Uint16Array(valueCount);
+    for (let index = 0; index < valueCount; index += 1) {
+      values[index] = readU16(payload, dataOffset + index * 2);
+    }
+    return {
+      gridPoints,
+      precision,
+      values,
+    };
+  }
+
+  throw new Error(`Unsupported mAB/mBA CLUT precision: ${precision}`);
 }
 
 export function parseIccLutTag(data: Uint8Array, tag: CmsIccTagEntry): CmsParsedLutTagValue {
@@ -175,13 +301,36 @@ function parseMultiProcessElements(
 
   let clutGridPoints: number[] | undefined;
   let clutPrecision: number | undefined;
+  let bCurves: readonly CmsToneCurve[] | undefined;
+  let matrixValues: readonly number[] | undefined;
+  let matrixOffsetValues: readonly number[] | undefined;
+  let mCurves: readonly CmsToneCurve[] | undefined;
+  let clutValuesParsed: Uint8Array | Uint16Array | undefined;
+  let aCurves: readonly CmsToneCurve[] | undefined;
+
+  if (offsets.bCurves !== 0) {
+    bCurves = parseCurveSet(payload, offsets.bCurves, outputChannels);
+  }
+
+  if (offsets.matrix !== 0) {
+    const parsedMatrix = parseMatrixBlock(payload, offsets.matrix);
+    matrixValues = parsedMatrix.matrixValues;
+    matrixOffsetValues = parsedMatrix.offsetValues;
+  }
+
+  if (offsets.mCurves !== 0) {
+    mCurves = parseCurveSet(payload, offsets.mCurves, outputChannels);
+  }
 
   if (offsets.clut !== 0) {
-    clutGridPoints = [];
-    for (let i = 0; i < inputChannels; i += 1) {
-      clutGridPoints.push(readU8(payload, offsets.clut + i));
-    }
-    clutPrecision = readU8(payload, offsets.clut + 16);
+    const parsedClut = parseClutBlock(payload, offsets.clut, inputChannels, outputChannels);
+    clutGridPoints = [...parsedClut.gridPoints];
+    clutPrecision = parsedClut.precision;
+    clutValuesParsed = parsedClut.values;
+  }
+
+  if (offsets.aCurves !== 0) {
+    aCurves = parseCurveSet(payload, offsets.aCurves, inputChannels);
   }
 
   const base = {
@@ -199,8 +348,14 @@ function parseMultiProcessElements(
 
   return {
     ...base,
+    ...(bCurves ? { bCurves } : {}),
+    ...(matrixValues ? { matrixValues } : {}),
+    ...(matrixOffsetValues ? { matrixOffsetValues } : {}),
+    ...(mCurves ? { mCurves } : {}),
     ...(clutGridPoints ? { clutGridPoints } : {}),
     ...(clutPrecision !== undefined ? { clutPrecision } : {}),
+    ...(clutValuesParsed ? { clutValuesParsed } : {}),
+    ...(aCurves ? { aCurves } : {}),
   };
 }
 
