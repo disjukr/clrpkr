@@ -1,10 +1,11 @@
 import { defineConfig } from "vite";
 import vinext from "vinext";
+import { nitro } from "nitro/vite";
 import UnoCSS from "unocss/vite";
 import { resolve } from "node:path";
 
 export default defineConfig({
-  plugins: [vinext(), normalizeVinextWindowsPaths(), UnoCSS()],
+  plugins: [vinext(), nitro(), normalizeVinextWindowsPaths(), UnoCSS()],
   server: {
     fs: {
       allow: [resolve(__dirname, "..")],
