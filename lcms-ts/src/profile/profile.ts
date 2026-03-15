@@ -96,10 +96,10 @@ export function parseIccProfile(data: Uint8Array): {
     records: tags.map((tag) => {
       const rawPayload = data.slice(tag.offset, tag.offset + tag.size);
       const payloadKey = `${tag.offset}:${tag.size}`;
+      const owner = parsedOwners.get(payloadKey);
 
       try {
         const value = parseIccTagValue(data, tag);
-        const owner = parsedOwners.get(payloadKey);
         const record = {
           signature: tag.signature,
           value,
@@ -109,11 +109,14 @@ export function parseIccProfile(data: Uint8Array): {
         parsedOwners.set(payloadKey, record);
         return record;
       } catch {
-        return {
+        const record = {
           signature: tag.signature,
           rawPayload,
           rawOnly: true,
+          ...(owner && areTagSignaturesLinkCompatible(owner.signature, tag.signature) ? { linkedTo: owner.signature } : {}),
         };
+        parsedOwners.set(payloadKey, record);
+        return record;
       }
     }),
   };
