@@ -13,9 +13,16 @@ import {
 import {
   BackSide,
   ClampToEdgeWrapping,
+  Data3DTexture,
   DataTexture,
   DoubleSide,
+  FloatType,
+  FrontSide,
+  GLSL3,
+  Matrix4,
   LinearFilter,
+  RedFormat,
+  ShaderMaterial,
   type Texture,
 } from "three";
 import { parseNrrd } from "../../../icc2sdf/dist/src/nrrd.js";
@@ -46,6 +53,7 @@ type SurfacePointCloud = {
 };
 
 type SliceAxis = "x" | "y" | "z";
+type RenderMode = "slices" | "raymarch";
 
 type R3fDeps = {
   readonly Canvas: typeof import("@react-three/fiber").Canvas;
@@ -347,6 +355,294 @@ function SurfacePoints(props: { readonly cloud: SurfacePointCloud }) {
   );
 }
 
+function createVolumeTexture(volume: NrrdVolume<Float32Array>): Data3DTexture {
+  const {
+    data,
+    metadata: {
+      dimensions: { width, height, depth },
+    },
+  } = volume;
+
+  const texture = new Data3DTexture(data, width, height, depth);
+  texture.format = RedFormat;
+  texture.type = FloatType;
+  texture.minFilter = LinearFilter;
+  texture.magFilter = LinearFilter;
+  texture.wrapS = ClampToEdgeWrapping;
+  texture.wrapT = ClampToEdgeWrapping;
+  texture.wrapR = ClampToEdgeWrapping;
+  texture.generateMipmaps = false;
+  texture.unpackAlignment = 1;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createVolumeRaymarchMaterial(
+  texture: Data3DTexture,
+  volume: NrrdVolume<Float32Array>,
+  maxAbs: number,
+  isoThreshold: number,
+): ShaderMaterial {
+  const {
+    metadata: {
+      dimensions: { width, height, depth },
+      spacing,
+    },
+  } = volume;
+  const boxScale = [
+    Math.abs(spacing.yStep) * Math.max(1, height - 1),
+    Math.abs(spacing.xStep) * Math.max(1, width - 1),
+    Math.abs(spacing.zStep) * Math.max(1, depth - 1),
+  ] as const;
+
+  return new ShaderMaterial({
+    glslVersion: GLSL3,
+    transparent: false,
+    side: FrontSide,
+    depthWrite: true,
+    depthTest: true,
+    uniforms: {
+      volumeTex: { value: texture },
+      inverseModelMatrix: { value: new Matrix4() },
+      boxScale: { value: boxScale },
+      labMin: {
+        value: [
+          volume.metadata.origin.y,
+          volume.metadata.origin.x,
+          volume.metadata.origin.z,
+        ],
+      },
+      labSpan: {
+        value: [
+          Math.abs(volume.metadata.spacing.yStep) * Math.max(1, height - 1),
+          Math.abs(volume.metadata.spacing.xStep) * Math.max(1, width - 1),
+          Math.abs(volume.metadata.spacing.zStep) * Math.max(1, depth - 1),
+        ],
+      },
+      texelSize: { value: [1 / Math.max(width, 1), 1 / Math.max(height, 1), 1 / Math.max(depth, 1)] },
+      maxAbs: { value: Math.max(maxAbs, 0.0001) },
+      isoThreshold: { value: Math.max(isoThreshold, 0.0001) },
+      stepCount: { value: 96 },
+    },
+    vertexShader: `
+      out vec3 vLocalPosition;
+
+      void main() {
+        vLocalPosition = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      precision highp sampler3D;
+
+      uniform sampler3D volumeTex;
+      uniform mat4 inverseModelMatrix;
+      uniform vec3 boxScale;
+      uniform vec3 labMin;
+      uniform vec3 labSpan;
+      uniform vec3 texelSize;
+      uniform float maxAbs;
+      uniform float isoThreshold;
+      uniform float stepCount;
+
+      in vec3 vLocalPosition;
+      out vec4 outColor;
+
+      vec2 intersectBox(vec3 rayOrigin, vec3 rayDir) {
+        vec3 boxMin = vec3(-0.5);
+        vec3 boxMax = vec3(0.5);
+        vec3 invDir = 1.0 / rayDir;
+        vec3 t0 = (boxMin - rayOrigin) * invDir;
+        vec3 t1 = (boxMax - rayOrigin) * invDir;
+        vec3 tsmaller = min(t0, t1);
+        vec3 tbigger = max(t0, t1);
+        float tNear = max(max(tsmaller.x, tsmaller.y), tsmaller.z);
+        float tFar = min(min(tbigger.x, tbigger.y), tbigger.z);
+        return vec2(tNear, tFar);
+      }
+
+      float sampleSdf(vec3 localPoint) {
+        return texture(volumeTex, localPoint + 0.5).r;
+      }
+
+      vec3 localPointToLab(vec3 localPoint) {
+        return labMin + (localPoint + 0.5) * labSpan;
+      }
+
+      vec3 labToXyzD50(vec3 lab) {
+        float fy = (lab.x + 16.0) / 116.0;
+        float fx = fy + lab.y / 500.0;
+        float fz = fy - lab.z / 200.0;
+
+        float epsilon = 216.0 / 24389.0;
+        float kappa = 24389.0 / 27.0;
+
+        float xr = pow(fx, 3.0) > epsilon ? pow(fx, 3.0) : (116.0 * fx - 16.0) / kappa;
+        float yr = lab.x > (kappa * epsilon) ? pow((lab.x + 16.0) / 116.0, 3.0) : lab.x / kappa;
+        float zr = pow(fz, 3.0) > epsilon ? pow(fz, 3.0) : (116.0 * fz - 16.0) / kappa;
+
+        return vec3(
+          xr * 0.9642,
+          yr * 1.0,
+          zr * 0.8251
+        );
+      }
+
+      float linearToSrgbChannel(float channel) {
+        if (channel <= 0.0031308) {
+          return 12.92 * channel;
+        }
+        return 1.055 * pow(channel, 1.0 / 2.4) - 0.055;
+      }
+
+      vec3 xyzD50ToSrgb(vec3 xyz) {
+        vec3 linear = vec3(
+          3.1338561 * xyz.x - 1.6168667 * xyz.y - 0.4906146 * xyz.z,
+          -0.9787684 * xyz.x + 1.9161415 * xyz.y + 0.0334540 * xyz.z,
+          0.0719453 * xyz.x - 0.2289914 * xyz.y + 1.4052427 * xyz.z
+        );
+        linear = max(linear, vec3(0.0));
+        return clamp(vec3(
+          linearToSrgbChannel(linear.r),
+          linearToSrgbChannel(linear.g),
+          linearToSrgbChannel(linear.b)
+        ), 0.0, 1.0);
+      }
+
+      vec3 sampleGradient(vec3 localPoint) {
+        vec3 eps = texelSize;
+        float dx = sampleSdf(localPoint + vec3(eps.x, 0.0, 0.0)) - sampleSdf(localPoint - vec3(eps.x, 0.0, 0.0));
+        float dy = sampleSdf(localPoint + vec3(0.0, eps.y, 0.0)) - sampleSdf(localPoint - vec3(0.0, eps.y, 0.0));
+        float dz = sampleSdf(localPoint + vec3(0.0, 0.0, eps.z)) - sampleSdf(localPoint - vec3(0.0, 0.0, eps.z));
+        return normalize(vec3(dx, dy, dz) + 1e-6);
+      }
+
+      float refineSurfaceHit(vec3 rayOrigin, vec3 rayDir, float nearT, float farT) {
+        float a = nearT;
+        float b = farT;
+        float fa = sampleSdf(rayOrigin + rayDir * a);
+        for (int i = 0; i < 6; i++) {
+          float mid = 0.5 * (a + b);
+          float fm = sampleSdf(rayOrigin + rayDir * mid);
+          if (sign(fa) == sign(fm)) {
+            a = mid;
+            fa = fm;
+          } else {
+            b = mid;
+          }
+        }
+        return 0.5 * (a + b);
+      }
+
+      void main() {
+        vec3 rayOrigin = (inverseModelMatrix * vec4(cameraPosition, 1.0)).xyz;
+        vec3 rayDir = normalize(vLocalPosition - rayOrigin);
+        vec2 hit = intersectBox(rayOrigin, rayDir);
+
+        if (hit.x > hit.y || hit.y < 0.0) {
+          discard;
+        }
+
+        float t = max(hit.x, 0.0);
+        float tEnd = hit.y;
+        float hitThreshold = max(isoThreshold * 0.22, 0.0025);
+        float previousT = t;
+        float previousSdf = sampleSdf(rayOrigin + rayDir * t);
+        float rayMetric = max(length(rayDir * boxScale), 1e-4);
+
+        for (float i = 0.0; i < 256.0; i += 1.0) {
+          if (i >= stepCount || t > tEnd) {
+            break;
+          }
+
+          vec3 samplePoint = rayOrigin + rayDir * t;
+          float sdf = sampleSdf(samplePoint);
+          float absSdf = abs(sdf);
+
+          if (absSdf <= hitThreshold || sdf * previousSdf < 0.0) {
+            float refinedT = absSdf <= hitThreshold ? t : refineSurfaceHit(rayOrigin, rayDir, previousT, t);
+            samplePoint = rayOrigin + rayDir * refinedT;
+            sdf = sampleSdf(samplePoint);
+            vec3 normal = sampleGradient(samplePoint);
+            vec3 lab = localPointToLab(samplePoint);
+            vec3 base = xyzD50ToSrgb(labToXyzD50(lab));
+            vec3 lightDir = normalize(vec3(0.45, 0.72, 0.55));
+            vec3 viewDir = normalize(rayOrigin - samplePoint);
+            float diffuse = max(dot(normal, lightDir), 0.0);
+            float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.2);
+            float rim = pow(1.0 - max(dot(normal, viewDir), 0.0), 4.0);
+            vec3 coolLift = vec3(0.16, 0.74, 0.98) * fresnel * 0.12;
+            vec3 color = base * (0.45 + diffuse * 0.75) + vec3(1.0, 1.0, 1.0) * rim * 0.06 + coolLift;
+            outColor = vec4(color, 1.0);
+            return;
+          }
+
+          previousT = t;
+          previousSdf = sdf;
+          t += clamp(absSdf / rayMetric, 0.0015, 0.04);
+        }
+
+        discard;
+      }
+    `,
+  });
+}
+
+function VolumeRaymarch(props: {
+  readonly volume: NrrdVolume<Float32Array>;
+  readonly maxAbs: number;
+  readonly isoThreshold: number;
+}) {
+  const meshRef = useRef<{
+    updateMatrixWorld(force?: boolean): void;
+    readonly matrixWorld: Matrix4;
+  } | null>(null);
+  const texture = useMemo(() => createVolumeTexture(props.volume), [props.volume]);
+  const material = useMemo(
+    () => createVolumeRaymarchMaterial(texture, props.volume, props.maxAbs, props.isoThreshold),
+    [props.isoThreshold, props.maxAbs, props.volume, texture],
+  );
+
+  useEffect(() => () => texture.dispose(), [texture]);
+  useEffect(() => () => material.dispose(), [material]);
+  useEffect(() => {
+    material.uniforms.maxAbs.value = Math.max(props.maxAbs, 0.0001);
+    material.uniforms.isoThreshold.value = Math.max(props.isoThreshold, 0.0001);
+  }, [material, props.isoThreshold, props.maxAbs]);
+  useEffect(() => {
+    meshRef.current?.updateMatrixWorld(true);
+    const mesh = meshRef.current;
+    if (mesh) {
+      material.uniforms.inverseModelMatrix.value.copy(mesh.matrixWorld).invert();
+    }
+  }, [material, props.volume]);
+
+  const {
+    metadata: {
+      dimensions: { width, height, depth },
+      spacing,
+      origin,
+    },
+  } = props.volume;
+
+  const sizeX = Math.abs(spacing.xStep) * Math.max(1, width - 1);
+  const sizeY = Math.abs(spacing.yStep) * Math.max(1, height - 1);
+  const sizeZ = Math.abs(spacing.zStep) * Math.max(1, depth - 1);
+  const center = mapLabToDisplay(
+    origin.x + (width - 1) * spacing.xStep * 0.5,
+    origin.y + (height - 1) * spacing.yStep * 0.5,
+    origin.z + (depth - 1) * spacing.zStep * 0.5,
+  );
+
+  return (
+    <mesh ref={meshRef} position={center} scale={[sizeY, sizeX, sizeZ]} renderOrder={5}>
+      <boxGeometry args={[1, 1, 1]} />
+      <primitive attach="material" object={material} />
+    </mesh>
+  );
+}
+
 function getVolumeFrame(volume: NrrdVolume<Float32Array>) {
   const {
     metadata: {
@@ -395,7 +691,7 @@ function getCameraPositionForView(
     default:
       return [
         center[0] + distance * 0.9,
-        center[1] - distance * 1.1,
+        center[1] + distance * 1.1,
         center[2] + distance * 0.85,
       ];
   }
@@ -509,7 +805,6 @@ function OrientationWidgetScene(props: {
   return (
     <Canvas camera={{ position: [0, 0, radius], fov: 28 }}>
       <OrientationWidgetCamera />
-      <color attach="background" args={["#00000000"]} />
       <ambientLight intensity={1.2} />
       <group>
         <mesh
@@ -759,6 +1054,8 @@ function VolumeScene(props: {
   readonly zSlice: number;
   readonly windowAbs: number;
   readonly isoThreshold: number;
+  readonly renderMode: RenderMode;
+  readonly maxAbs: number;
   readonly viewState: CameraViewState;
   readonly dragState: OrientationDragState | null;
   readonly onOrientationChange: (angles: OrientationAngles) => void;
@@ -788,10 +1085,20 @@ function VolumeScene(props: {
       <group>
         <VolumeBounds volume={props.volume} />
         <LabAxes volume={props.volume} deps={props.deps} />
-        <AxisSlice volume={props.volume} axis="x" sliceIndex={props.xSlice} windowAbs={props.windowAbs} />
-        <AxisSlice volume={props.volume} axis="y" sliceIndex={props.ySlice} windowAbs={props.windowAbs} />
-        <AxisSlice volume={props.volume} axis="z" sliceIndex={props.zSlice} windowAbs={props.windowAbs} />
-        <SurfacePoints cloud={cloud} />
+        {props.renderMode === "raymarch" ? (
+          <VolumeRaymarch
+            volume={props.volume}
+            maxAbs={props.maxAbs}
+            isoThreshold={props.isoThreshold}
+          />
+        ) : (
+          <>
+            <AxisSlice volume={props.volume} axis="x" sliceIndex={props.xSlice} windowAbs={props.windowAbs} />
+            <AxisSlice volume={props.volume} axis="y" sliceIndex={props.ySlice} windowAbs={props.windowAbs} />
+            <AxisSlice volume={props.volume} axis="z" sliceIndex={props.zSlice} windowAbs={props.windowAbs} />
+            <SurfacePoints cloud={cloud} />
+          </>
+        )}
       </group>
       <OrbitControls
         enableDamping
@@ -850,6 +1157,7 @@ export default function NrrdRoute() {
   const [selectedPreset, setSelectedPreset] = useState("");
   const [windowScale, setWindowScale] = useState(0.2);
   const [surfaceScale, setSurfaceScale] = useState(0.03);
+  const [renderMode, setRenderMode] = useState<RenderMode>("slices");
   const [xSlice, setXSlice] = useState(0);
   const [ySlice, setYSlice] = useState(0);
   const [zSlice, setZSlice] = useState(0);
@@ -1104,9 +1412,27 @@ export default function NrrdRoute() {
                 <div className="overflow-hidden rounded-[1.4rem] border border-black/8 bg-[rgba(255,252,246,0.84)] shadow-[0_16px_36px_rgba(70,48,22,0.08)] backdrop-blur">
                   <div className="flex items-baseline justify-between gap-4 border-b border-black/8 px-4 py-3">
                     <h2>Volume View</h2>
-                    <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">
-                      {dims?.width} × {dims?.height} × {dims?.depth}
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <div className="inline-flex rounded-full border border-black/10 bg-white/70 p-1 text-[11px] uppercase tracking-[0.12em] text-stone-700">
+                        <button
+                          className={`rounded-full px-3 py-1 transition ${renderMode === "slices" ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"}`}
+                          type="button"
+                          onClick={() => setRenderMode("slices")}
+                        >
+                          Slice + points
+                        </button>
+                        <button
+                          className={`rounded-full px-3 py-1 transition ${renderMode === "raymarch" ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"}`}
+                          type="button"
+                          onClick={() => setRenderMode("raymarch")}
+                        >
+                          Raymarch
+                        </button>
+                      </div>
+                      <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">
+                        {dims?.width} × {dims?.height} × {dims?.depth}
+                      </span>
+                    </div>
                   </div>
                   <div className="h-[38rem]">
                     {r3fDeps ? (
@@ -1142,6 +1468,8 @@ export default function NrrdRoute() {
                           zSlice={zSlice}
                           windowAbs={windowAbs}
                           isoThreshold={isoThreshold}
+                          renderMode={renderMode}
+                          maxAbs={stats.maxAbs}
                           viewState={viewState}
                           dragState={dragState}
                           onOrientationChange={setOrientation}
@@ -1181,27 +1509,31 @@ export default function NrrdRoute() {
                   <section className="rounded-[1.4rem] border border-black/8 bg-[rgba(255,252,246,0.84)] p-4 shadow-[0_16px_36px_rgba(70,48,22,0.08)] backdrop-blur">
                     <div className="mb-3 flex items-baseline justify-between gap-4">
                       <h2>Slice Controls</h2>
-                      <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">Three axes</span>
+                      <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">
+                        {renderMode === "raymarch" ? "Disabled in raymarch mode" : "Three axes"}
+                      </span>
                     </div>
                     <div className="grid gap-3">
                       <label className="grid gap-1.5 text-sm text-stone-700">
-                        <span>L slice ({xSlice})</span>
+                        <span>a slice ({xSlice})</span>
                         <input
                           type="range"
                           min={0}
                           max={Math.max(0, (dims?.width ?? 1) - 1)}
                           value={xSlice}
                           onChange={(event) => setXSlice(Number(event.target.value))}
+                          disabled={renderMode === "raymarch"}
                         />
                       </label>
                       <label className="grid gap-1.5 text-sm text-stone-700">
-                        <span>a slice ({ySlice})</span>
+                        <span>L slice ({ySlice})</span>
                         <input
                           type="range"
                           min={0}
                           max={Math.max(0, (dims?.height ?? 1) - 1)}
                           value={ySlice}
                           onChange={(event) => setYSlice(Number(event.target.value))}
+                          disabled={renderMode === "raymarch"}
                         />
                       </label>
                       <label className="grid gap-1.5 text-sm text-stone-700">
@@ -1212,6 +1544,7 @@ export default function NrrdRoute() {
                           max={Math.max(0, (dims?.depth ?? 1) - 1)}
                           value={zSlice}
                           onChange={(event) => setZSlice(Number(event.target.value))}
+                          disabled={renderMode === "raymarch"}
                         />
                       </label>
                     </div>
@@ -1224,7 +1557,7 @@ export default function NrrdRoute() {
                     </div>
                     <div className="grid gap-3">
                       <label className="grid gap-1.5 text-sm text-stone-700">
-                        <span>Slice window ({windowAbs.toFixed(2)})</span>
+                        <span>{renderMode === "raymarch" ? "Density window" : "Slice window"} ({windowAbs.toFixed(2)})</span>
                         <input
                           type="range"
                           min={0.01}
@@ -1235,7 +1568,7 @@ export default function NrrdRoute() {
                         />
                       </label>
                       <label className="grid gap-1.5 text-sm text-stone-700">
-                        <span>Near-surface threshold ({isoThreshold.toFixed(2)})</span>
+                        <span>{renderMode === "raymarch" ? "Surface glow width" : "Near-surface threshold"} ({isoThreshold.toFixed(2)})</span>
                         <input
                           type="range"
                           min={0.002}
