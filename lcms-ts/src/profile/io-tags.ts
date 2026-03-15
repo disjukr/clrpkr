@@ -11,6 +11,7 @@ import {
   writeU64,
 } from "./io-base.js";
 import {
+  type CmsGenericMultiProcessTagValue,
   serializeIccLutTag,
   type CmsLut16TagValue,
   type CmsLut8TagValue,
@@ -684,6 +685,7 @@ export function serializeIccTagValue(
     | CmsDateTimeTagValue
     | CmsDictionaryTagValue
     | CmsDescTagValue
+    | CmsGenericMultiProcessTagValue
     | CmsLut16TagValue
     | CmsLut8TagValue
     | CmsMhc2TagValue
@@ -730,6 +732,7 @@ export function serializeIccTagValue(
     case "mft2":
     case "mAB":
     case "mBA":
+    case "mpet":
       return serializeIccLutTag(value);
     case "mluc":
       return serializeMlucTag(value);

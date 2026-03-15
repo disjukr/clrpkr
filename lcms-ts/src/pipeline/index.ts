@@ -13,6 +13,7 @@ import {
 } from "../profile/profile.js";
 import {
   parseIccLutTag,
+  type CmsGenericMultiProcessTagValue,
   type CmsLut16TagValue,
   type CmsLut8TagValue,
   type CmsMultiProcessElementTagValue,
@@ -47,6 +48,25 @@ export type CmsPipelineStage =
       readonly outputChannels: number;
       readonly gridPoints: readonly number[];
       readonly values: Uint8Array;
+    }
+  | {
+      readonly kind: "clutf";
+      readonly inputChannels: number;
+      readonly outputChannels: number;
+      readonly gridPoints: readonly number[];
+      readonly values: Float32Array;
+    }
+  | {
+      readonly kind: "normalize-to-lab";
+    }
+  | {
+      readonly kind: "normalize-from-lab";
+    }
+  | {
+      readonly kind: "normalize-to-xyz";
+    }
+  | {
+      readonly kind: "normalize-from-xyz";
     };
 
 export interface CmsPipeline {
@@ -225,8 +245,53 @@ function buildPipelineFromMpe(tag: CmsMultiProcessElementTagValue): CmsPipeline 
   };
 }
 
-export function buildPipelineFromParsedTag(tag: Extract<CmsParsedTagValue, CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue>): CmsPipeline {
+function buildPipelineFromGenericMpe(tag: CmsGenericMultiProcessTagValue): CmsPipeline {
+  const stages: CmsPipelineStage[] = [];
+
+  for (const element of tag.elements) {
+    switch (element.kind) {
+      case "cvst":
+        if (!curvesAreIdentity(element.curves)) {
+          stages.push({ kind: "tone-curves", channels: element.inputChannels, curves: element.curves });
+        }
+        break;
+      case "matf":
+        stages.push({
+          kind: "matrix",
+          rows: element.outputChannels,
+          cols: element.inputChannels,
+          matrix: element.matrix,
+          offset: element.offset,
+        });
+        break;
+      case "clut":
+        stages.push({
+          kind: "clutf",
+          inputChannels: element.inputChannels,
+          outputChannels: element.outputChannels,
+          gridPoints: element.gridPoints,
+          values: element.values,
+        });
+        break;
+      case "bACS":
+      case "eACS":
+        break;
+    }
+  }
+
+  return {
+    inputChannels: tag.inputChannels,
+    outputChannels: tag.outputChannels,
+    stages,
+  };
+}
+
+export function buildPipelineFromParsedTag(
+  tag: Extract<CmsParsedTagValue, CmsGenericMultiProcessTagValue | CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue>,
+): CmsPipeline {
   switch (tag.kind) {
+    case "mpet":
+      return buildPipelineFromGenericMpe(tag);
     case "mft2":
       return buildPipelineFromLut16(tag);
     case "mft1":
@@ -282,7 +347,7 @@ function sampleClutValue(
 }
 
 function evaluateClutStage(
-  stage: Extract<CmsPipelineStage, { kind: "clut8" | "clut16" }>,
+  stage: Extract<CmsPipelineStage, { kind: "clut8" | "clut16" | "clutf" }>,
   input: readonly number[],
   interpolation: NonNullable<CmsPipelineEvalOptions["interpolation"]>,
 ): number[] {
@@ -294,7 +359,7 @@ function evaluateClutStage(
 }
 
 function evaluateClutStageMultilinear(
-  stage: Extract<CmsPipelineStage, { kind: "clut8" | "clut16" }>,
+  stage: Extract<CmsPipelineStage, { kind: "clut8" | "clut16" | "clutf" }>,
   input: readonly number[],
 ): number[] {
   const output = new Array(stage.outputChannels).fill(0);
@@ -332,12 +397,12 @@ function evaluateClutStageMultilinear(
     }
   }
 
-  const scale = stage.kind === "clut8" ? 255 : 65535;
+  const scale = stage.kind === "clut8" ? 255 : stage.kind === "clut16" ? 65535 : 1;
   return output.map((value) => clampUnit(value / scale));
 }
 
 function evaluateClutStageTetrahedral(
-  stage: Extract<CmsPipelineStage, { kind: "clut8" | "clut16" }>,
+  stage: Extract<CmsPipelineStage, { kind: "clut8" | "clut16" | "clutf" }>,
   input: readonly number[],
 ): number[] {
   const [gx, gy, gz] = stage.gridPoints;
@@ -356,7 +421,7 @@ function evaluateClutStageTetrahedral(
   const y1 = y0 + (clampUnit(input[1] ?? 0) >= 1 ? 0 : 1);
   const z1 = z0 + (clampUnit(input[2] ?? 0) >= 1 ? 0 : 1);
   const strides = computeStrides(stage.gridPoints, stage.outputChannels);
-  const scale = stage.kind === "clut8" ? 255 : 65535;
+  const scale = stage.kind === "clut8" ? 255 : stage.kind === "clut16" ? 65535 : 1;
   const output = new Array(stage.outputChannels).fill(0);
 
   for (let outIndex = 0; outIndex < stage.outputChannels; outIndex += 1) {
@@ -400,6 +465,30 @@ function evaluateClutStageTetrahedral(
   return output;
 }
 
+function evaluateNormalizationStage(
+  stage: Extract<CmsPipelineStage, { kind: "normalize-to-lab" | "normalize-from-lab" | "normalize-to-xyz" | "normalize-from-xyz" }>,
+  input: readonly number[],
+): number[] {
+  switch (stage.kind) {
+    case "normalize-to-lab":
+      return [
+        clampUnit((input[0] ?? 0) / 100),
+        clampUnit(((input[1] ?? 0) + 128) / 255),
+        clampUnit(((input[2] ?? 0) + 128) / 255),
+      ];
+    case "normalize-from-lab":
+      return [
+        clampUnit((input[0] ?? 0) * 100),
+        (input[1] ?? 0) * 255 - 128,
+        (input[2] ?? 0) * 255 - 128,
+      ];
+    case "normalize-to-xyz":
+      return [(input[0] ?? 0), (input[1] ?? 0), (input[2] ?? 0)];
+    case "normalize-from-xyz":
+      return [(input[0] ?? 0), (input[1] ?? 0), (input[2] ?? 0)];
+  }
+}
+
 export function cmsPipelineEvalFloat(
   input: readonly number[],
   pipeline: CmsPipeline,
@@ -418,7 +507,14 @@ export function cmsPipelineEvalFloat(
         break;
       case "clut8":
       case "clut16":
+      case "clutf":
         current = evaluateClutStage(stage, current, interpolation);
+        break;
+      case "normalize-to-lab":
+      case "normalize-from-lab":
+      case "normalize-to-xyz":
+      case "normalize-from-xyz":
+        current = evaluateNormalizationStage(stage, current);
         break;
     }
   }
@@ -427,10 +523,81 @@ export function cmsPipelineEvalFloat(
 }
 
 const DEVICE_TO_PCS_16 = ["A2B0", "A2B1", "A2B2", "A2B1"] as const;
+const DEVICE_TO_PCS_FLOAT = ["D2B0", "D2B1", "D2B2", "D2B3"] as const;
 const PCS_TO_DEVICE_16 = ["B2A0", "B2A1", "B2A2", "B2A1"] as const;
+const PCS_TO_DEVICE_FLOAT = ["B2D0", "B2D1", "B2D2", "B2D3"] as const;
+
+function prependNormalizationStages(pipeline: CmsPipeline, ...stages: readonly CmsPipelineStage[]): CmsPipeline {
+  return {
+    ...pipeline,
+    stages: [...stages, ...pipeline.stages],
+  };
+}
+
+function appendNormalizationStages(pipeline: CmsPipeline, ...stages: readonly CmsPipelineStage[]): CmsPipeline {
+  return {
+    ...pipeline,
+    stages: [...pipeline.stages, ...stages],
+  };
+}
+
+function buildFloatInputPipeline(profile: CmsProfile, signature: string): CmsPipeline | null {
+  const tag = cmsReadTag(profile, signature);
+  if (!tag || !isLutTag(tag)) {
+    return null;
+  }
+
+  let pipeline = buildPipelineFromParsedTag(tag);
+  const colorSpace = cmsGetColorSpace(profile);
+  const pcs = cmsGetPCS(profile);
+
+  if (colorSpace === "Lab ") {
+    pipeline = prependNormalizationStages(pipeline, { kind: "normalize-to-lab" });
+  } else if (colorSpace === "XYZ ") {
+    pipeline = prependNormalizationStages(pipeline, { kind: "normalize-to-xyz" });
+  }
+
+  if (pcs === "Lab ") {
+    pipeline = appendNormalizationStages(pipeline, { kind: "normalize-from-lab" });
+  } else if (pcs === "XYZ ") {
+    pipeline = appendNormalizationStages(pipeline, { kind: "normalize-from-xyz" });
+  }
+
+  return pipeline;
+}
+
+function buildFloatOutputPipeline(profile: CmsProfile, signature: string): CmsPipeline | null {
+  const tag = cmsReadTag(profile, signature);
+  if (!tag || !isLutTag(tag)) {
+    return null;
+  }
+
+  let pipeline = buildPipelineFromParsedTag(tag);
+  const pcs = cmsGetPCS(profile);
+  const colorSpace = cmsGetColorSpace(profile);
+
+  if (pcs === "Lab ") {
+    pipeline = prependNormalizationStages(pipeline, { kind: "normalize-to-lab" });
+  } else if (pcs === "XYZ ") {
+    pipeline = prependNormalizationStages(pipeline, { kind: "normalize-to-xyz" });
+  }
+
+  if (colorSpace === "Lab ") {
+    pipeline = appendNormalizationStages(pipeline, { kind: "normalize-from-lab" });
+  } else if (colorSpace === "XYZ ") {
+    pipeline = appendNormalizationStages(pipeline, { kind: "normalize-from-xyz" });
+  }
+
+  return pipeline;
+}
 
 export function cmsReadInputLUT(profile: CmsProfile, intent: number): CmsPipeline | null {
   if (intent <= INTENT_ABSOLUTE_COLORIMETRIC) {
+    let floatSignature = DEVICE_TO_PCS_FLOAT[intent] ?? DEVICE_TO_PCS_FLOAT[INTENT_PERCEPTUAL];
+    if (cmsIsTag(profile, floatSignature)) {
+      return buildFloatInputPipeline(profile, floatSignature);
+    }
+
     let signature = DEVICE_TO_PCS_16[intent] ?? DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
     if (!cmsIsTag(profile, signature)) {
       signature = DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
@@ -451,6 +618,11 @@ export function cmsReadInputLUT(profile: CmsProfile, intent: number): CmsPipelin
 
 export function cmsReadOutputLUT(profile: CmsProfile, intent: number): CmsPipeline | null {
   if (intent <= INTENT_ABSOLUTE_COLORIMETRIC) {
+    let floatSignature = PCS_TO_DEVICE_FLOAT[intent] ?? PCS_TO_DEVICE_FLOAT[INTENT_PERCEPTUAL];
+    if (cmsIsTag(profile, floatSignature)) {
+      return buildFloatOutputPipeline(profile, floatSignature);
+    }
+
     let signature = PCS_TO_DEVICE_16[intent] ?? PCS_TO_DEVICE_16[INTENT_PERCEPTUAL];
     if (!cmsIsTag(profile, signature)) {
       signature = PCS_TO_DEVICE_16[INTENT_PERCEPTUAL];
@@ -475,6 +647,10 @@ export function cmsReadDevicelinkLUT(profile: CmsProfile, intent: number): CmsPi
   }
 
   let signature = DEVICE_TO_PCS_16[intent] ?? DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
+  const floatSignature = DEVICE_TO_PCS_FLOAT[intent] ?? DEVICE_TO_PCS_FLOAT[INTENT_PERCEPTUAL];
+  if (cmsIsTag(profile, floatSignature)) {
+    return buildFloatInputPipeline(profile, floatSignature);
+  }
   if (!cmsIsTag(profile, signature)) {
     signature = DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
   }
@@ -483,8 +659,8 @@ export function cmsReadDevicelinkLUT(profile: CmsProfile, intent: number): CmsPi
   return tag && isLutTag(tag) ? buildPipelineFromParsedTag(tag) : null;
 }
 
-function isLutTag(tag: CmsParsedTagValue): tag is CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue {
-  return tag.kind === "mft1" || tag.kind === "mft2" || tag.kind === "mAB" || tag.kind === "mBA";
+function isLutTag(tag: CmsParsedTagValue): tag is CmsGenericMultiProcessTagValue | CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue {
+  return tag.kind === "mft1" || tag.kind === "mft2" || tag.kind === "mAB" || tag.kind === "mBA" || tag.kind === "mpet";
 }
 
 function buildRgbInputMatrixShaper(profile: CmsProfile): CmsPipeline | null {

@@ -8,6 +8,7 @@ import {
   cmsGetTagCount,
   cmsIsTag,
   cmsLinkTag,
+  md5Hex,
   cmsOpenProfileFromMem,
   cmsReadRawTag,
   cmsReadTag,
@@ -59,6 +60,11 @@ describe("ICC profile serialization", () => {
     expect(validateIccTagTable(serialized.header, serialized.tags, serialized.bytes.byteLength)).toEqual([]);
     expect(serialized.header.profileSize).toBe(serialized.bytes.byteLength);
     expect(serialized.header.tagCount).toBe(records.length);
+    const digestInput = new Uint8Array(serialized.bytes);
+    digestInput.fill(0, 44, 48);
+    digestInput.fill(0, 64, 68);
+    digestInput.fill(0, 84, 100);
+    expect(serialized.header.profileId).toBe(md5Hex(digestInput));
   });
 
   it("parses back records from a serialized minimal profile", () => {
