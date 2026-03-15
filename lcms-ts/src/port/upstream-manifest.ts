@@ -167,8 +167,8 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     upstreamSource: "cmstypes.c",
     category: "tag-types",
     targetModule: "src/profile/tag-types.ts",
-    status: "planned",
-    notes: "ICC tag type readers and writers.",
+    status: "in-progress",
+    notes: "Common ICC metadata/tag payload readers and writers are in place for scalar types, sequence types, and several printing-related tags; named colors, dictionaries, VCGT, and richer MPE paths remain.",
   },
   {
     upstreamSource: "cmsvirt.c",
