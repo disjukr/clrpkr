@@ -171,6 +171,16 @@ export interface CmsS15Fixed16ArrayTagValue {
   readonly values: readonly number[];
 }
 
+export interface CmsU16Fixed16ArrayTagValue {
+  readonly kind: "uf32";
+  readonly values: readonly number[];
+}
+
+export interface CmsColorantOrderTagValue {
+  readonly kind: "clro";
+  readonly colorants: readonly number[];
+}
+
 export interface CmsUInt8ArrayTagValue {
   readonly kind: "ui08";
   readonly values: Uint8Array;
@@ -220,6 +230,7 @@ export interface CmsParametricCurveTagValue {
 
 export type CmsParsedTagValue =
   | CmsChromaticityTagValue
+  | CmsColorantOrderTagValue
   | CmsColorantTableTagValue
   | CmsCurveTagValue
   | CmsCrdInfoTagValue
@@ -239,6 +250,7 @@ export type CmsParsedTagValue =
   | CmsScreeningTagValue
   | CmsSignatureTagValue
   | CmsTextTagValue
+  | CmsU16Fixed16ArrayTagValue
   | CmsUInt32ArrayTagValue
   | CmsUInt64ArrayTagValue
   | CmsUInt8ArrayTagValue
@@ -279,6 +291,14 @@ export function getTagEntry(tags: readonly CmsIccTagEntry[], signature: string):
 export function parseIccTagValue(data: Uint8Array, tag: CmsIccTagEntry): CmsParsedTagValue {
   const payload = sliceIccRange(data, tag.offset, tag.size, `Tag ${tag.signature}`);
   const type = readSignature(payload, 0);
+  const typeSignature = readU32(payload, 0);
+
+  switch (typeSignature) {
+    case 0x17a505b8:
+      return parseXyzTag(payload);
+    case 0x9478ee00:
+      return parseCurveTag(payload);
+  }
 
   switch (type) {
     case "desc":
@@ -335,12 +355,16 @@ export function parseIccTagValue(data: Uint8Array, tag: CmsIccTagEntry): CmsPars
       return parseVideoSignalTag(payload);
     case "chrm":
       return parseChromaticityTag(payload);
+    case "clro":
+      return parseColorantOrderTag(payload);
     case "mft1":
     case "mft2":
     case "mAB ":
     case "mBA ":
     case "mpet":
       return parseIccLutTag(data, tag);
+    case "uf32":
+      return parseU16Fixed16ArrayTag(payload);
     default:
       throw new Error(`Unsupported ICC tag type ${JSON.stringify(type)} for tag ${tag.signature}`);
   }
@@ -825,6 +849,30 @@ function parseS15Fixed16ArrayTag(payload: Uint8Array): CmsS15Fixed16ArrayTagValu
   return {
     kind: "sf32",
     values,
+  };
+}
+
+function parseU16Fixed16ArrayTag(payload: Uint8Array): CmsU16Fixed16ArrayTagValue {
+  const count = (payload.byteLength - 8) / 4;
+  const values: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    values.push(readU32(payload, 8 + index * 4) / 65536);
+  }
+  return {
+    kind: "uf32",
+    values,
+  };
+}
+
+function parseColorantOrderTag(payload: Uint8Array): CmsColorantOrderTagValue {
+  const count = readU32(payload, 8);
+  const colorants: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    colorants.push(payload[12 + index] ?? 0);
+  }
+  return {
+    kind: "clro",
+    colorants,
   };
 }
 

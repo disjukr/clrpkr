@@ -14,6 +14,7 @@ import {
   serializeIccTagRecord,
   serializeIccTagValue,
   type CmsChromaticityTagValue,
+  type CmsColorantOrderTagValue,
   type CmsColorantTableTagValue,
   type CmsCurveTagValue,
   type CmsCrdInfoTagValue,
@@ -31,6 +32,7 @@ import {
   type CmsScreeningTagValue,
   type CmsSignatureTagValue,
   type CmsTextTagValue,
+  type CmsU16Fixed16ArrayTagValue,
   type CmsUInt32ArrayTagValue,
   type CmsUInt64ArrayTagValue,
   type CmsUInt8ArrayTagValue,
@@ -229,6 +231,14 @@ describe("ICC tag serialization", () => {
       kind: "sf32",
       values: [1.25, -0.5, 0.125],
     };
+    const uf32: CmsU16Fixed16ArrayTagValue = {
+      kind: "uf32",
+      values: [1.25, 0.5, 32767.125],
+    };
+    const clro: CmsColorantOrderTagValue = {
+      kind: "clro",
+      colorants: [3, 0, 1, 2],
+    };
     const ui08: CmsUInt8ArrayTagValue = {
       kind: "ui08",
       values: new Uint8Array([1, 2, 3, 250]),
@@ -333,6 +343,8 @@ describe("ICC tag serialization", () => {
     expect(reparseSerialized("ncl2", ncl2)).toEqual(ncl2);
     expect(reparseSerialized("meta", dict)).toEqual(dict);
     expect(reparseSerialized("arts", sf32)).toEqual(sf32);
+    expect(reparseSerialized("bfd ", uf32)).toEqual(uf32);
+    expect(reparseSerialized("clro", clro)).toEqual(clro);
     expect(reparseSerialized("ui08", ui08)).toEqual(ui08);
     expect(reparseSerialized("ui32", ui32)).toEqual(ui32);
     expect(reparseSerialized("ui64", ui64)).toEqual(ui64);
@@ -354,5 +366,36 @@ describe("ICC tag serialization", () => {
     reparsedMhc2.redCurve.forEach((value, index) => expect(value).toBeCloseTo(mhc2.redCurve[index]!, 4));
     reparsedMhc2.greenCurve.forEach((value, index) => expect(value).toBeCloseTo(mhc2.greenCurve[index]!, 4));
     reparsedMhc2.blueCurve.forEach((value, index) => expect(value).toBeCloseTo(mhc2.blueCurve[index]!, 4));
+  });
+
+  it("accepts upstream broken cmstypes aliases", () => {
+    const xyzPayload = serializeIccTagValue({
+      kind: "XYZ",
+      value: { X: 0.9642, Y: 1, Z: 0.8249 },
+    });
+    xyzPayload[0] = 0x17;
+    xyzPayload[1] = 0xa5;
+    xyzPayload[2] = 0x05;
+    xyzPayload[3] = 0xb8;
+
+    const curvePayload = serializeIccTagValue({
+      kind: "curv",
+      curve: cmsBuildTabulatedToneCurve16(3, [0, 32768, 65535]),
+      entryCount: 3,
+    });
+    curvePayload[0] = 0x94;
+    curvePayload[1] = 0x78;
+    curvePayload[2] = 0xee;
+    curvePayload[3] = 0x00;
+
+    expect(parseIccTagValue(xyzPayload, { signature: "wtpt", offset: 0, size: xyzPayload.byteLength })).toEqual({
+      kind: "XYZ",
+      value: { X: 0.964202880859375, Y: 1, Z: 0.8249053955078125 },
+    });
+    expect(parseIccTagValue(curvePayload, { signature: "rTRC", offset: 0, size: curvePayload.byteLength })).toEqual({
+      kind: "curv",
+      curve: cmsBuildTabulatedToneCurve16(3, [0, 32768, 65535]),
+      entryCount: 3,
+    });
   });
 });

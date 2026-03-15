@@ -167,8 +167,8 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     upstreamSource: "cmstypes.c",
     category: "tag-types",
     targetModule: "src/profile/tag-types.ts",
-    status: "in-progress",
-    notes: "Common ICC metadata/tag payload readers and writers are in place for scalar, sequence, named-color, dictionary, VCGT, video-signal, MHC2, generic arrays, and several printing-related tags; richer MPE/plugin paths remain.",
+    status: "done",
+    notes: "Common ICC metadata/tag payload readers and writers are in place for scalar, sequence, named-color, dictionary, VCGT, video-signal, MHC2, colorant-order, S15/U16 fixed arrays, generic uint arrays, several printing-related tags, and upstream broken-type aliases; broader MPE plugin extensibility remains under cmslut/plugin scope.",
   },
   {
     upstreamSource: "cmsvirt.c",

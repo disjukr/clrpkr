@@ -25,12 +25,13 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
 - `cmsmtrx`, `cmspcs`, `cmswtpnt`, `cmsgamma`, and `cmslut` are `bootstrapped` rather than `planned`.
 - `cmsio0` is now effectively `done` for the current runtime-neutral scope: shared binary I/O primitives, raw/cooked tag handling, linked tags, ICC header/tag-table serialization, memory save/open, and generic stream save are in place.
 - `cmsio1` is now effectively `done` for the current scope: supported scalar/LUT tag serialization, intent-based LUT selection, devicelink lookup, float `DToB*` / `BToD*` tag selection, named-color pipeline selection, Lab v2/v4 compatibility stages, matrix-shaper fallbacks, and profile info lookup are in place.
-- `cmstypes` is now `in-progress` with a growing ICC tag payload subset:
+- `cmstypes` is now effectively `done` for the current scope:
   - scalar/text types: `desc`, `text`, `mluc`, `XYZ `, `curv`, `para`, `sig `, `data`, `dtim`
   - measurement/viewing types: `meas`, `view`, `chrm`
-  - table/sequence types: `clrt`, `ncl2`, `pseq`, `psid`, `dict`, `vcgt`, `MHC2`
+  - table/sequence types: `clrt`, `clro`, `ncl2`, `pseq`, `psid`, `dict`, `vcgt`, `MHC2`
   - print-oriented types: `bfd `, `crdi`, `scrn`, `cicp`
-  - generic array types: `sf32`, `ui08`, `ui32`, `ui64`
+  - generic array types: `sf32`, `uf32`, `ui08`, `ui32`, `ui64`
+  - upstream broken-type aliases for Corbis XYZ and Monaco curve payloads are accepted on parse
 - There is now a minimal profile-level serializer for the supported tag set, including memory and generic stream helpers, plus save-time MD5/profile ID regeneration.
 - ICC profile support is currently read-oriented:
   - header parsing
@@ -61,9 +62,7 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
   - profile creation
   - tag write-back
   - full tag type coverage
-- `cmstypes` still has notable gaps:
-  - broader `multiProcessElementType` coverage beyond the current curve/matrix/CLUT subset
-  - some less-common array/helper paths only indirectly covered through raw payload support
+- `cmstypes` payload coverage is now broad enough to treat profile tag parsing/writing as `done` for the current scope; remaining richer `multiProcessElementType` plugin paths sit closer to `cmslut`/plugin extensibility than to common scalar tag handling.
 - Transform creation and execution APIs are still missing:
   - profile linking
   - intent handling
