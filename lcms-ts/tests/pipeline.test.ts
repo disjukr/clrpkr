@@ -3,7 +3,18 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { buildPipelineFromTag, cmsPipelineEvalFloat, parseIccHeader, parseIccTagTable } from "../src/index.js";
+import {
+  buildPipelineFromTag,
+  cmsBuildParametricToneCurve,
+  cmsCreateProfilePlaceholder,
+  cmsPipelineEvalFloat,
+  cmsReadDevicelinkLUT,
+  cmsReadInputLUT,
+  cmsReadOutputLUT,
+  parseIccHeader,
+  parseIccTagTable,
+  parseIccTagValue,
+} from "../src/index.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 
@@ -115,5 +126,119 @@ describe("pipeline mapping", () => {
     expect(tetrahedral[0]).toBeCloseTo(0.5, 6);
     expect(multilinear[0]).toBeCloseTo(0.25, 6);
     expect(automatic[0]).toBeCloseTo(tetrahedral[0]!, 6);
+  });
+
+  it("selects CLUT pipelines by intent from CMYK profiles", () => {
+    const fullPath = path.join(repoRoot, "icc-profiles", "eci/eciCMYK_v2.icc");
+    const data = readFileSync(fullPath);
+    const header = parseIccHeader(data);
+    const tags = parseIccTagTable(data, header);
+    const profile = cmsCreateProfilePlaceholder(
+      header,
+      ["A2B0", "B2A0", "B2A2"].map((signature) => {
+        const tag = tags.find((entry) => entry.signature === signature);
+        if (!tag) {
+          throw new Error(`Tag ${signature} not found`);
+        }
+        return { signature, value: parseIccTagValue(data, tag) };
+      }),
+    );
+
+    const input = cmsReadInputLUT(profile, 0);
+    const output = cmsReadOutputLUT(profile, 0);
+
+    expect(input?.stages.some((stage) => stage.kind === "clut16")).toBe(true);
+    expect(output?.stages.some((stage) => stage.kind === "clut16" || stage.kind === "clut8")).toBe(true);
+  });
+
+  it("falls back to matrix-shaper pipelines for RGB matrix profiles", () => {
+    const fullPath = path.join(repoRoot, "icc-profiles", "eci/eciRGB_v2_ICCv4.icc");
+    const data = readFileSync(fullPath);
+    const header = parseIccHeader(data);
+    const tags = parseIccTagTable(data, header);
+    const profile = cmsCreateProfilePlaceholder(
+      header,
+      ["rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC"].map((signature) => {
+        const tag = tags.find((entry) => entry.signature === signature);
+        if (!tag) {
+          throw new Error(`Tag ${signature} not found`);
+        }
+        return { signature, value: parseIccTagValue(data, tag) };
+      }),
+    );
+
+    const input = cmsReadInputLUT(profile, 0);
+    const output = cmsReadOutputLUT(profile, 0);
+
+    expect(input?.stages.map((stage) => stage.kind)).toEqual(["tone-curves", "matrix"]);
+    expect(output?.stages.map((stage) => stage.kind)).toEqual(["matrix", "tone-curves"]);
+
+    const forward = cmsPipelineEvalFloat([0.25, 0.5, 0.75], input!);
+    const reverse = cmsPipelineEvalFloat(forward, output!);
+
+    expect(forward.every((value) => Number.isFinite(value))).toBe(true);
+    expect(reverse).toHaveLength(3);
+    expect(reverse.every((value) => value >= 0 && value <= 1)).toBe(true);
+  });
+
+  it("builds gray fallback pipelines for gray matrix-shaper profiles", () => {
+    const rgbPath = path.join(repoRoot, "icc-profiles", "eci/eciRGB_v2_ICCv4.icc");
+    const rgbData = readFileSync(rgbPath);
+    const rgbHeader = parseIccHeader(rgbData);
+    const profile = cmsCreateProfilePlaceholder(
+      {
+        ...rgbHeader,
+        colorSpace: "GRAY",
+        pcs: "XYZ ",
+      },
+      [
+        {
+          signature: "kTRC",
+          value: {
+            kind: "curv",
+            curve: cmsBuildParametricToneCurve(1, [2.2]),
+            entryCount: 1,
+          },
+        },
+      ],
+    );
+
+    const input = cmsReadInputLUT(profile, 0);
+    const output = cmsReadOutputLUT(profile, 0);
+
+    expect(input?.stages.map((stage) => stage.kind)).toEqual(["tone-curves", "matrix"]);
+    expect(output?.stages.map((stage) => stage.kind)).toEqual(["matrix", "tone-curves"]);
+
+    const xyz = cmsPipelineEvalFloat([0.5], input!);
+    const gray = cmsPipelineEvalFloat(xyz, output!);
+
+    expect(xyz).toHaveLength(3);
+    expect(gray[0]).toBeCloseTo(0.5, 3);
+  });
+
+  it("selects devicelink LUTs by intent", () => {
+    const fullPath = path.join(repoRoot, "icc-profiles", "eci/eciCMYK_v2.icc");
+    const data = readFileSync(fullPath);
+    const header = parseIccHeader(data);
+    const tags = parseIccTagTable(data, header);
+    const profile = cmsCreateProfilePlaceholder(
+      {
+        ...header,
+        deviceClass: "link",
+      },
+      ["A2B0", "A2B2"].map((signature) => {
+        const tag = tags.find((entry) => entry.signature === signature);
+        if (!tag) {
+          throw new Error(`Tag ${signature} not found`);
+        }
+        return { signature, value: parseIccTagValue(data, tag) };
+      }),
+    );
+
+    const perceptual = cmsReadDevicelinkLUT(profile, 0);
+    const saturation = cmsReadDevicelinkLUT(profile, 2);
+
+    expect(perceptual?.stages.some((stage) => stage.kind === "clut16")).toBe(true);
+    expect(saturation?.stages.some((stage) => stage.kind === "clut16")).toBe(true);
   });
 });

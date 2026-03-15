@@ -23,7 +23,7 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
 
 - `cmsmtrx`, `cmspcs`, `cmswtpnt`, `cmsgamma`, and `cmslut` are `bootstrapped` rather than `planned`.
 - `cmsio0` is now `in-progress` with shared binary I/O primitives plus initial serialization support for ICC headers and tag tables.
-- `cmsio1` is now `in-progress` with initial serialization support for the currently parsed non-LUT tag payloads.
+- `cmsio1` is now `in-progress` with supported scalar/LUT tag serialization, intent-based LUT selection, devicelink lookup, gray/RGB matrix-shaper fallbacks, and profile info lookup.
 - There is now a minimal profile-level serializer for the supported tag set, including memory and generic stream helpers, but filesystem adapters and MD5/profile ID regeneration are still missing.
 - ICC profile support is currently read-oriented:
   - header parsing
@@ -32,7 +32,7 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
   - LUT structure parsing for `mft1`, `mft2`, `mAB`, `mBA`
 - Pipeline execution is currently partial:
   - float evaluation only
-  - stage kinds: tone curves, matrix, 8-bit CLUT, 16-bit CLUT
+  - stage kinds: tone curves, generic matrix, 8-bit CLUT, 16-bit CLUT
   - interpolation modes: multilinear and tetrahedral for 3-channel CLUTs
 - Upstream oracle checks are available via `zig cc`:
   - `oracle/pipeline_oracle.c`
@@ -52,9 +52,12 @@ Port the public Little CMS surface and the core implementation to TypeScript wit
 
 - Full ICC profile I/O is still missing:
   - profile creation
-  - stream/file serialization
   - tag write-back
   - full tag type coverage
+- `cmsio1` still has unported advanced paths:
+  - float `DToB*` / `BToD*` LUT tags
+  - named-color devicelink support
+  - Lab v2/v4 normalization glue around pipelines
 - Transform creation and execution APIs are still missing:
   - profile linking
   - intent handling

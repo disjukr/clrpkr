@@ -1,5 +1,16 @@
+import { CMS_D50_XYZ } from "../color/conversions.js";
 import type { CmsMAT3 } from "../math/matrix.js";
-import { cmsMAT3eval, cmsVEC3init } from "../math/matrix.js";
+import { cmsMAT3inverse } from "../math/matrix.js";
+import {
+  cmsGetDeviceClass,
+  cmsGetColorSpace,
+  cmsGetPCS,
+  cmsIsTag,
+  cmsReadTag,
+  INTENT_ABSOLUTE_COLORIMETRIC,
+  INTENT_PERCEPTUAL,
+  type CmsProfile,
+} from "../profile/profile.js";
 import {
   parseIccLutTag,
   type CmsLut16TagValue,
@@ -9,10 +20,12 @@ import {
 import type { CmsIccTagEntry } from "../profile/tag-table.js";
 import {
   cmsBuildParametricToneCurve,
+  cmsReverseToneCurve,
   cmsBuildTabulatedToneCurve16,
   cmsEvalToneCurveFloat,
   type CmsToneCurve,
 } from "../tone-curve/index.js";
+import type { CmsCurveTagValue, CmsParsedTagValue, CmsXyzTagValue } from "../profile/tags.js";
 
 export type CmsPipelineStage =
   | {
@@ -24,7 +37,7 @@ export type CmsPipelineStage =
       readonly kind: "matrix";
       readonly rows: number;
       readonly cols: number;
-      readonly matrix: CmsMAT3;
+      readonly matrix: readonly number[];
       readonly offset: readonly number[];
     }
   | {
@@ -116,13 +129,7 @@ function buildPipelineFromLut16(tag: CmsLut16TagValue): CmsPipeline {
       kind: "matrix",
       rows: 3,
       cols: 3,
-      matrix: {
-        v: [
-          { n: [tag.matrix[0]!, tag.matrix[1]!, tag.matrix[2]!] },
-          { n: [tag.matrix[3]!, tag.matrix[4]!, tag.matrix[5]!] },
-          { n: [tag.matrix[6]!, tag.matrix[7]!, tag.matrix[8]!] },
-        ],
-      },
+      matrix: tag.matrix,
       offset: [0, 0, 0],
     });
   }
@@ -165,13 +172,7 @@ function buildPipelineFromLut8(tag: CmsLut8TagValue): CmsPipeline {
       kind: "matrix",
       rows: 3,
       cols: 3,
-      matrix: {
-        v: [
-          { n: [tag.matrix[0]!, tag.matrix[1]!, tag.matrix[2]!] },
-          { n: [tag.matrix[3]!, tag.matrix[4]!, tag.matrix[5]!] },
-          { n: [tag.matrix[6]!, tag.matrix[7]!, tag.matrix[8]!] },
-        ],
-      },
+      matrix: tag.matrix,
       offset: [0, 0, 0],
     });
   }
@@ -247,13 +248,7 @@ function parseMatrixStage(payload: Uint8Array, offset: number): CmsPipelineStage
     kind: "matrix",
     rows: 3,
     cols: 3,
-    matrix: {
-      v: [
-        { n: [values[0]!, values[1]!, values[2]!] },
-        { n: [values[3]!, values[4]!, values[5]!] },
-        { n: [values[6]!, values[7]!, values[8]!] },
-      ],
-    },
+    matrix: values.slice(0, 9),
     offset: [values[9]!, values[10]!, values[11]!],
   };
 }
@@ -334,18 +329,23 @@ function buildPipelineFromMpe(tag: CmsMultiProcessElementTagValue, payload: Uint
   };
 }
 
-export function buildPipelineFromTag(data: Uint8Array, tag: CmsIccTagEntry): CmsPipeline {
-  const parsed = parseIccLutTag(data, tag);
-
-  switch (parsed.kind) {
+export function buildPipelineFromParsedTag(tag: Extract<CmsParsedTagValue, CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue>): CmsPipeline {
+  switch (tag.kind) {
     case "mft2":
-      return buildPipelineFromLut16(parsed);
+      return buildPipelineFromLut16(tag);
     case "mft1":
-      return buildPipelineFromLut8(parsed);
+      return buildPipelineFromLut8(tag);
     case "mAB":
     case "mBA":
-      return buildPipelineFromMpe(parsed, data.slice(tag.offset, tag.offset + tag.size));
+      return buildPipelineFromMpe(tag, tag.rawPayload);
   }
+}
+
+export function buildPipelineFromTag(data: Uint8Array, tag: CmsIccTagEntry): CmsPipeline {
+  const parsed = parseIccLutTag(data, tag);
+  return parsed.kind === "mAB" || parsed.kind === "mBA"
+    ? buildPipelineFromMpe(parsed, data.slice(tag.offset, tag.offset + tag.size))
+    : buildPipelineFromParsedTag(parsed);
 }
 
 function evaluateToneCurveStage(stage: Extract<CmsPipelineStage, { kind: "tone-curves" }>, input: readonly number[]): number[] {
@@ -353,12 +353,13 @@ function evaluateToneCurveStage(stage: Extract<CmsPipelineStage, { kind: "tone-c
 }
 
 function evaluateMatrixStage(stage: Extract<CmsPipelineStage, { kind: "matrix" }>, input: readonly number[]): number[] {
-  const result = cmsMAT3eval(stage.matrix, cmsVEC3init(input[0] ?? 0, input[1] ?? 0, input[2] ?? 0));
-  return [
-    clampUnit(result.n[0] + (stage.offset[0] ?? 0)),
-    clampUnit(result.n[1] + (stage.offset[1] ?? 0)),
-    clampUnit(result.n[2] + (stage.offset[2] ?? 0)),
-  ];
+  return Array.from({ length: stage.rows }, (_, row) => {
+    let value = stage.offset[row] ?? 0;
+    for (let col = 0; col < stage.cols; col += 1) {
+      value += (stage.matrix[row * stage.cols + col] ?? 0) * (input[col] ?? 0);
+    }
+    return clampUnit(value);
+  });
 }
 
 function computeStrides(gridPoints: readonly number[], outputChannels: number): number[] {
@@ -529,4 +530,272 @@ export function cmsPipelineEvalFloat(
   }
 
   return current;
+}
+
+const DEVICE_TO_PCS_16 = ["A2B0", "A2B1", "A2B2", "A2B1"] as const;
+const PCS_TO_DEVICE_16 = ["B2A0", "B2A1", "B2A2", "B2A1"] as const;
+
+export function cmsReadInputLUT(profile: CmsProfile, intent: number): CmsPipeline | null {
+  if (intent <= INTENT_ABSOLUTE_COLORIMETRIC) {
+    let signature = DEVICE_TO_PCS_16[intent] ?? DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
+    if (!cmsIsTag(profile, signature)) {
+      signature = DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
+    }
+
+    const tag = cmsReadTag(profile, signature);
+    if (tag && isLutTag(tag)) {
+      return buildPipelineFromParsedTag(tag);
+    }
+  }
+
+  if (cmsGetColorSpace(profile) === "GRAY") {
+    return buildGrayInputMatrixPipeline(profile);
+  }
+
+  return cmsGetColorSpace(profile) === "RGB " ? buildRgbInputMatrixShaper(profile) : null;
+}
+
+export function cmsReadOutputLUT(profile: CmsProfile, intent: number): CmsPipeline | null {
+  if (intent <= INTENT_ABSOLUTE_COLORIMETRIC) {
+    let signature = PCS_TO_DEVICE_16[intent] ?? PCS_TO_DEVICE_16[INTENT_PERCEPTUAL];
+    if (!cmsIsTag(profile, signature)) {
+      signature = PCS_TO_DEVICE_16[INTENT_PERCEPTUAL];
+    }
+
+    const tag = cmsReadTag(profile, signature);
+    if (tag && isLutTag(tag)) {
+      return buildPipelineFromParsedTag(tag);
+    }
+  }
+
+  if (cmsGetColorSpace(profile) === "GRAY") {
+    return buildGrayOutputPipeline(profile);
+  }
+
+  return cmsGetColorSpace(profile) === "RGB " ? buildRgbOutputMatrixShaper(profile) : null;
+}
+
+export function cmsReadDevicelinkLUT(profile: CmsProfile, intent: number): CmsPipeline | null {
+  if (cmsGetDeviceClass(profile) !== "link" || intent > INTENT_ABSOLUTE_COLORIMETRIC) {
+    return null;
+  }
+
+  let signature = DEVICE_TO_PCS_16[intent] ?? DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
+  if (!cmsIsTag(profile, signature)) {
+    signature = DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
+  }
+
+  const tag = cmsReadTag(profile, signature);
+  return tag && isLutTag(tag) ? buildPipelineFromParsedTag(tag) : null;
+}
+
+function isLutTag(tag: CmsParsedTagValue): tag is CmsLut16TagValue | CmsLut8TagValue | CmsMultiProcessElementTagValue {
+  return tag.kind === "mft1" || tag.kind === "mft2" || tag.kind === "mAB" || tag.kind === "mBA";
+}
+
+function buildRgbInputMatrixShaper(profile: CmsProfile): CmsPipeline | null {
+  const rXyz = cmsReadTag(profile, "rXYZ");
+  const gXyz = cmsReadTag(profile, "gXYZ");
+  const bXyz = cmsReadTag(profile, "bXYZ");
+  const rTrc = cmsReadTag(profile, "rTRC");
+  const gTrc = cmsReadTag(profile, "gTRC");
+  const bTrc = cmsReadTag(profile, "bTRC");
+
+  if (!isXyzTag(rXyz) || !isXyzTag(gXyz) || !isXyzTag(bXyz) || !isCurveLikeTag(rTrc) || !isCurveLikeTag(gTrc) || !isCurveLikeTag(bTrc)) {
+    return null;
+  }
+
+  const stages: CmsPipelineStage[] = [
+    {
+      kind: "tone-curves",
+      channels: 3,
+      curves: [extractCurve(rTrc), extractCurve(gTrc), extractCurve(bTrc)],
+    },
+    {
+      kind: "matrix",
+      rows: 3,
+      cols: 3,
+      matrix: [
+        rXyz.value.X,
+        gXyz.value.X,
+        bXyz.value.X,
+        rXyz.value.Y,
+        gXyz.value.Y,
+        bXyz.value.Y,
+        rXyz.value.Z,
+        gXyz.value.Z,
+        bXyz.value.Z,
+      ],
+      offset: [0, 0, 0],
+    },
+  ];
+
+  return {
+    inputChannels: 3,
+    outputChannels: 3,
+    stages,
+  };
+}
+
+function buildRgbOutputMatrixShaper(profile: CmsProfile): CmsPipeline | null {
+  const input = buildRgbInputMatrixShaper(profile);
+  if (!input) {
+    return null;
+  }
+
+  const matrix = input.stages.find((stage) => stage.kind === "matrix");
+  const curves = input.stages.find((stage) => stage.kind === "tone-curves");
+  if (!matrix || !curves) {
+    return null;
+  }
+
+  const matrix3 = matrixStageToMat3(matrix);
+  if (!matrix3) {
+    return null;
+  }
+
+  const inverse = cmsMAT3inverse(matrix3);
+  if (!inverse) {
+    return null;
+  }
+
+  return {
+    inputChannels: 3,
+    outputChannels: 3,
+    stages: [
+      {
+        kind: "matrix",
+        rows: 3,
+        cols: 3,
+        matrix: flattenMat3(inverse),
+        offset: [0, 0, 0],
+      },
+      {
+        kind: "tone-curves",
+        channels: 3,
+        curves: curves.curves.map((curve) => cmsReverseToneCurve(curve)),
+      },
+    ],
+  };
+}
+
+function buildGrayInputMatrixPipeline(profile: CmsProfile): CmsPipeline | null {
+  const grayTrc = cmsReadTag(profile, "kTRC");
+  if (!isCurveLikeTag(grayTrc)) {
+    return null;
+  }
+
+  const curve = extractCurve(grayTrc);
+
+  if (cmsGetPCS(profile) === "Lab ") {
+    return {
+      inputChannels: 1,
+      outputChannels: 3,
+      stages: [
+        {
+          kind: "tone-curves",
+          channels: 1,
+          curves: [curve],
+        },
+        {
+          kind: "matrix",
+          rows: 3,
+          cols: 1,
+          matrix: [1, 0, 0],
+          offset: [0, 0.5, 0.5],
+        },
+      ],
+    };
+  }
+
+  return {
+    inputChannels: 1,
+    outputChannels: 3,
+    stages: [
+      {
+        kind: "tone-curves",
+        channels: 1,
+        curves: [curve],
+      },
+      {
+        kind: "matrix",
+        rows: 3,
+        cols: 1,
+        matrix: [CMS_D50_XYZ.X, CMS_D50_XYZ.Y, CMS_D50_XYZ.Z],
+        offset: [0, 0, 0],
+      },
+    ],
+  };
+}
+
+function buildGrayOutputPipeline(profile: CmsProfile): CmsPipeline | null {
+  const grayTrc = cmsReadTag(profile, "kTRC");
+  if (!isCurveLikeTag(grayTrc)) {
+    return null;
+  }
+
+  const reverse = cmsReverseToneCurve(extractCurve(grayTrc));
+  const matrix =
+    cmsGetPCS(profile) === "Lab "
+      ? [1, 0, 0]
+      : [0, 1 / CMS_D50_XYZ.Y, 0];
+
+  return {
+    inputChannels: 3,
+    outputChannels: 1,
+    stages: [
+      {
+        kind: "matrix",
+        rows: 1,
+        cols: 3,
+        matrix,
+        offset: [0],
+      },
+      {
+        kind: "tone-curves",
+        channels: 1,
+        curves: [reverse],
+      },
+    ],
+  };
+}
+
+function flattenMat3(matrix: CmsMAT3): readonly number[] {
+  return [
+    matrix.v[0]!.n[0]!,
+    matrix.v[0]!.n[1]!,
+    matrix.v[0]!.n[2]!,
+    matrix.v[1]!.n[0]!,
+    matrix.v[1]!.n[1]!,
+    matrix.v[1]!.n[2]!,
+    matrix.v[2]!.n[0]!,
+    matrix.v[2]!.n[1]!,
+    matrix.v[2]!.n[2]!,
+  ];
+}
+
+function matrixStageToMat3(stage: Extract<CmsPipelineStage, { kind: "matrix" }>): CmsMAT3 | null {
+  if (stage.rows !== 3 || stage.cols !== 3 || stage.matrix.length < 9) {
+    return null;
+  }
+
+  return {
+    v: [
+      { n: [stage.matrix[0]!, stage.matrix[1]!, stage.matrix[2]!] },
+      { n: [stage.matrix[3]!, stage.matrix[4]!, stage.matrix[5]!] },
+      { n: [stage.matrix[6]!, stage.matrix[7]!, stage.matrix[8]!] },
+    ],
+  };
+}
+
+function isXyzTag(tag: CmsParsedTagValue | undefined): tag is CmsXyzTagValue {
+  return tag?.kind === "XYZ";
+}
+
+function isCurveLikeTag(tag: CmsParsedTagValue | undefined): tag is CmsCurveTagValue | Extract<CmsParsedTagValue, { kind: "para" }> {
+  return tag?.kind === "curv" || tag?.kind === "para";
+}
+
+function extractCurve(tag: CmsCurveTagValue | Extract<CmsParsedTagValue, { kind: "para" }>): CmsToneCurve {
+  return tag.curve;
 }
