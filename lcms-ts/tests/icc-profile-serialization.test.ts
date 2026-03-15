@@ -4,12 +4,16 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  cmsGetTagOffsetAndSize,
   cmsGetTagCount,
   cmsIsTag,
+  cmsLinkTag,
   cmsOpenProfileFromMem,
   cmsReadRawTag,
   cmsReadTag,
   cmsSaveProfileToMem,
+  cmsSaveProfileToStream,
+  cmsTagLinkedTo,
   cmsWriteRawTag,
   cmsWriteTag,
   parseIccHeader,
@@ -120,5 +124,55 @@ describe("ICC profile serialization", () => {
       entries: [{ language: "en", country: "US", text: "patched profile" }],
     });
     expect(cmsReadRawTag(reparsed, "wtpt")).toEqual(rawWtpt);
+  });
+
+  it("supports linked tags sharing the same payload range", () => {
+    const { data, header, tags } = loadProfile("color/sRGB_v4_ICC_preference.icc");
+    const selected = ["desc", "cprt", "wtpt", "A2B0"] as const;
+    const serialized = serializeIccProfile(
+      { ...header },
+      selected.map((signature) => {
+        const tag = tags.find((entry) => entry.signature === signature);
+        if (!tag) {
+          throw new Error(`Missing tag ${signature}`);
+        }
+        return serializeIccTagRecord(signature, parseIccTagValue(data, tag));
+      }),
+    );
+
+    const linked = cmsLinkTag(cmsOpenProfileFromMem(serialized.bytes), "B2A0", "A2B0");
+    const saved = cmsSaveProfileToMem(linked);
+    const reopened = cmsOpenProfileFromMem(saved);
+    const a2b0Range = cmsGetTagOffsetAndSize(reopened, "A2B0");
+    const b2a0Range = cmsGetTagOffsetAndSize(reopened, "B2A0");
+
+    expect(cmsTagLinkedTo(reopened, "B2A0")).toBe("A2B0");
+    expect(cmsReadTag(reopened, "B2A0")).toEqual(cmsReadTag(reopened, "A2B0"));
+    expect(b2a0Range).toEqual(a2b0Range);
+  });
+
+  it("writes serialized profile bytes to a generic stream", () => {
+    const { data, header, tags } = loadProfile("color/sRGB_v4_ICC_preference.icc");
+    const selected = ["desc", "cprt", "wtpt", "A2B0", "B2A0"] as const;
+    const serialized = serializeIccProfile(
+      { ...header },
+      selected.map((signature) => {
+        const tag = tags.find((entry) => entry.signature === signature);
+        if (!tag) {
+          throw new Error(`Missing tag ${signature}`);
+        }
+        return serializeIccTagRecord(signature, parseIccTagValue(data, tag));
+      }),
+    );
+    const profile = cmsOpenProfileFromMem(serialized.bytes);
+    const chunks: Uint8Array[] = [];
+
+    cmsSaveProfileToStream(profile, {
+      write(chunk) {
+        chunks.push(new Uint8Array(chunk));
+      },
+    });
+
+    expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)))).toEqual(Buffer.from(serialized.bytes));
   });
 });

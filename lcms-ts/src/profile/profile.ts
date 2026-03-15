@@ -8,6 +8,7 @@ import { parseIccTagTable, type CmsIccTagEntry } from "./tag-table.js";
 export interface CmsIccProfileRecord {
   readonly signature: string;
   readonly value: CmsParsedTagValue;
+  readonly linkedTo?: string;
 }
 
 export interface CmsProfile extends CmsHandle<"profile"> {
@@ -54,6 +55,7 @@ export function parseIccProfile(data: Uint8Array): {
 } {
   const header = parseIccHeader(data);
   const tags = parseIccTagTable(data, header);
+  const payloadOwners = new Map<string, string>();
 
   return {
     header,
@@ -61,6 +63,12 @@ export function parseIccProfile(data: Uint8Array): {
     records: tags.map((tag) => ({
       signature: tag.signature,
       value: parseIccTagValue(data, tag),
+      ...(payloadOwners.has(`${tag.offset}:${tag.size}`)
+        ? { linkedTo: payloadOwners.get(`${tag.offset}:${tag.size}`)! }
+        : (() => {
+            payloadOwners.set(`${tag.offset}:${tag.size}`, tag.signature);
+            return {};
+          })()),
     })),
   };
 }
@@ -99,6 +107,13 @@ export function cmsSaveProfileToMem(profile: CmsProfile): Uint8Array {
   ).bytes;
 }
 
+export function cmsSaveProfileToStream(
+  profile: CmsProfile,
+  stream: { write(chunk: Uint8Array): void },
+): void {
+  stream.write(cmsSaveProfileToMem(profile));
+}
+
 export function cmsGetTagCount(profile: CmsProfile): number {
   return profile.records.length;
 }
@@ -116,9 +131,46 @@ export function cmsReadTag(profile: CmsProfile, signature: string): CmsParsedTag
 }
 
 export function cmsWriteTag(profile: CmsProfile, signature: string, value: CmsParsedTagValue): CmsProfile {
-  const nextRecords = profile.records.filter((record) => record.signature !== signature);
+  const nextRecords = profile.records
+    .filter((record) => record.signature !== signature)
+    .map((record) =>
+      record.linkedTo === signature
+        ? { ...record, value }
+        : record,
+    );
   nextRecords.push({ signature, value });
   return rebuildProfile(profile, nextRecords);
+}
+
+export function cmsLinkTag(profile: CmsProfile, signature: string, targetSignature: string): CmsProfile {
+  const target = profile.records.find((record) => record.signature === targetSignature);
+  if (!target) {
+    throw new Error(`Cannot link tag ${signature} to missing target ${targetSignature}`);
+  }
+
+  const nextRecords = profile.records.filter((record) => record.signature !== signature);
+  nextRecords.push({
+    signature,
+    value: target.value,
+    linkedTo: targetSignature,
+  });
+  return rebuildProfile(profile, nextRecords);
+}
+
+export function cmsTagLinkedTo(profile: CmsProfile, signature: string): string | undefined {
+  return profile.records.find((record) => record.signature === signature)?.linkedTo;
+}
+
+export function cmsGetTagOffsetAndSize(
+  profile: CmsProfile,
+  signature: string,
+): { offset: number; size: number } | undefined {
+  const serialized = serializeIccProfile(
+    profile.header,
+    profile.records.map((record) => serializeProfileRecord(record)),
+  );
+  const entry = serialized.tags.find((tag) => tag.signature === signature);
+  return entry ? { offset: entry.offset, size: entry.size } : undefined;
 }
 
 export function cmsReadRawTag(profile: CmsProfile, signature: string): Uint8Array | undefined {
@@ -149,5 +201,5 @@ function rebuildProfile(profile: CmsProfile, records: readonly CmsIccProfileReco
 }
 
 function serializeProfileRecord(record: CmsIccProfileRecord): CmsSerializedTagRecord {
-  return serializeIccTagRecord(record.signature, record.value);
+  return serializeIccTagRecord(record.signature, record.value, record.linkedTo ?? record.signature);
 }
