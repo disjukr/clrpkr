@@ -19,6 +19,19 @@ export interface LabVolumeSpacing {
   bStep: number;
 }
 
+export interface OccupancyGridMetadata {
+  dimensions: LabVolumeDimensions;
+  bounds: LabVolumeBounds;
+  spacing: LabVolumeSpacing;
+  sampleResolution: number;
+  intent: number;
+}
+
+export interface OccupancyGrid {
+  metadata: OccupancyGridMetadata;
+  data: Uint8Array;
+}
+
 export interface ScalarVolumeDimensions {
   width: number;
   height: number;
@@ -58,6 +71,18 @@ export interface IccSdfBuildConfig {
   dimensions: LabVolumeDimensions;
   bounds: LabVolumeBounds;
   blur?: SdfGaussianBlurConfig;
+}
+
+export interface OccupancyToSdfConfig {
+  distanceUnit?: "voxels" | "lab";
+  insideNegative?: boolean;
+}
+
+export interface IccOccupancyBuildConfig {
+  dimensions?: LabVolumeDimensions;
+  bounds?: LabVolumeBounds;
+  sampleResolution?: number;
+  intent?: number;
 }
 
 export interface SdfVolumeMetadata extends Omit<ScalarVolumeMetadata, "origin" | "spacing"> {
