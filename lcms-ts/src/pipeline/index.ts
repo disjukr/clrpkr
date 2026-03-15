@@ -638,6 +638,14 @@ function buildFloatOutputPipeline(profile: CmsProfile, signature: string): CmsPi
   return pipeline;
 }
 
+function buildRawFloatPipeline(profile: CmsProfile, signature: string): CmsPipeline | null {
+  const tag = cmsReadTag(profile, signature);
+  if (!tag || !isLutTag(tag)) {
+    return null;
+  }
+  return buildPipelineFromParsedTag(tag);
+}
+
 function adjustInputLut16Pipeline(profile: CmsProfile, pipeline: CmsPipeline, tag: CmsLut16TagValue): CmsPipeline {
   if (cmsGetPCS(profile) !== "Lab ") {
     return pipeline;
@@ -701,6 +709,13 @@ export function cmsReadInputLUT(profile: CmsProfile, intent: number): CmsPipelin
       ],
       preferredInterpolation: "tetrahedral",
     };
+  }
+
+  if (intent === 0xffffffff) {
+    if (cmsGetColorSpace(profile) === "GRAY") {
+      return buildGrayInputMatrixPipeline(profile);
+    }
+    return cmsGetColorSpace(profile) === "RGB " ? buildRgbInputMatrixShaper(profile) : null;
   }
 
   if (intent <= INTENT_ABSOLUTE_COLORIMETRIC) {
@@ -787,7 +802,7 @@ export function cmsReadDevicelinkLUT(profile: CmsProfile, intent: number): CmsPi
   }
   const fallbackFloatSignature = DEVICE_TO_PCS_FLOAT[INTENT_PERCEPTUAL];
   if (floatSignature !== fallbackFloatSignature && cmsIsTag(profile, fallbackFloatSignature)) {
-    return buildFloatInputPipeline(profile, fallbackFloatSignature);
+    return buildRawFloatPipeline(profile, fallbackFloatSignature);
   }
   if (!cmsIsTag(profile, signature)) {
     signature = DEVICE_TO_PCS_16[INTENT_PERCEPTUAL];
