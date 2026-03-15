@@ -91,7 +91,7 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     category: "pipeline",
     targetModule: "src/pipeline/index.ts",
     status: "bootstrapped",
-    notes: "Pipeline/stage data model and LUT tag mapping from mft1/mft2/mAB/mBA/mpet are in place, including float CLUT evaluation, named-color stages, and Lab/XYZ normalization compatibility helpers.",
+    notes: "Pipeline/stage data model and LUT tag mapping from mft1/mft2/mAB/mBA/mpet are in place, including float CLUT evaluation, named-color stages, Lab/XYZ normalization compatibility helpers, and raw-preserving generic mpet handling for unknown/vendor elements.",
   },
   {
     upstreamSource: "cmsmd5.c",

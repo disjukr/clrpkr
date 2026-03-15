@@ -8,6 +8,7 @@ import {
   writeS15Fixed16,
   writeSignature,
   writeU16,
+  writeU32,
 } from "./io-base.js";
 import { cmsBuildParametricToneCurve, cmsBuildTabulatedToneCurve16, type CmsToneCurve } from "../tone-curve/index.js";
 
@@ -89,11 +90,18 @@ export interface CmsGenericMpePassthroughElement {
   readonly kind: "bACS" | "eACS";
 }
 
+export interface CmsGenericMpeRawElement {
+  readonly kind: "raw";
+  readonly signature: string;
+  readonly rawElement: Uint8Array;
+}
+
 export type CmsGenericMpeElement =
   | CmsGenericMpeClutElement
   | CmsGenericMpeCurveSetElement
   | CmsGenericMpeMatrixElement
-  | CmsGenericMpePassthroughElement;
+  | CmsGenericMpePassthroughElement
+  | CmsGenericMpeRawElement;
 
 export interface CmsGenericMultiProcessTagValue {
   readonly kind: "mpet";
@@ -244,6 +252,10 @@ function readFloat32(payload: Uint8Array, offset: number): number {
   return new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getFloat32(offset, false);
 }
 
+function writeFloat32(payload: Uint8Array, offset: number, value: number): void {
+  new DataView(payload.buffer, payload.byteOffset, payload.byteLength).setFloat32(offset, value, false);
+}
+
 function parseGenericMultiProcessElements(payload: Uint8Array): CmsGenericMultiProcessTagValue {
   const inputChannels = readU16(payload, 8);
   const outputChannels = readU16(payload, 10);
@@ -252,6 +264,7 @@ function parseGenericMultiProcessElements(payload: Uint8Array): CmsGenericMultiP
 
   for (let index = 0; index < elementCount; index += 1) {
     const elementOffset = readU32(payload, 16 + index * 8);
+    const elementSize = readU32(payload, 16 + index * 8 + 4);
     const signature = readSignature(payload, elementOffset);
     const bodyOffset = elementOffset + 8;
 
@@ -304,7 +317,11 @@ function parseGenericMultiProcessElements(payload: Uint8Array): CmsGenericMultiP
         elements.push({ kind: signature });
         break;
       default:
-        throw new Error(`Unsupported generic MPE element ${JSON.stringify(signature)} at offset ${elementOffset}`);
+        elements.push({
+          kind: "raw",
+          signature,
+          rawElement: payload.slice(elementOffset, elementOffset + elementSize),
+        });
     }
   }
 
@@ -545,9 +562,88 @@ export function serializeIccLutTag(value: CmsParsedLutTagValue): Uint8Array {
       return serializeLut16(value);
     case "mAB":
     case "mBA":
-    case "mpet":
       return new Uint8Array(value.rawPayload);
+    case "mpet":
+      return serializeGenericMultiProcessTag(value);
   }
+}
+
+function canSerializeGenericMpeElement(element: CmsGenericMpeElement): boolean {
+  return element.kind === "bACS" || element.kind === "eACS" || element.kind === "matf" || element.kind === "clut" || element.kind === "raw";
+}
+
+function serializeGenericMpeElement(element: CmsGenericMpeElement): Uint8Array {
+  switch (element.kind) {
+    case "bACS":
+    case "eACS": {
+      const payload = new Uint8Array(8);
+      writeSignature(payload, 0, element.kind);
+      return payload;
+    }
+    case "matf": {
+      const matrixCount = element.inputChannels * element.outputChannels;
+      const payload = new Uint8Array(12 + (matrixCount + element.outputChannels) * 4);
+      writeSignature(payload, 0, "matf");
+      writeU16(payload, 8, element.inputChannels);
+      writeU16(payload, 10, element.outputChannels);
+      for (let index = 0; index < matrixCount; index += 1) {
+        writeFloat32(payload, 12 + index * 4, element.matrix[index] ?? 0);
+      }
+      for (let index = 0; index < element.outputChannels; index += 1) {
+        writeFloat32(payload, 12 + matrixCount * 4 + index * 4, element.offset[index] ?? 0);
+      }
+      return payload;
+    }
+    case "clut": {
+      const pointCount = element.gridPoints.reduce((acc, value) => acc * value, 1);
+      const valueCount = pointCount * element.outputChannels;
+      const payload = new Uint8Array(28 + valueCount * 4);
+      writeSignature(payload, 0, "clut");
+      writeU16(payload, 8, element.inputChannels);
+      writeU16(payload, 10, element.outputChannels);
+      for (let index = 0; index < element.inputChannels; index += 1) {
+        payload[12 + index] = element.gridPoints[index] ?? 0;
+      }
+      for (let index = 0; index < valueCount; index += 1) {
+        writeFloat32(payload, 28 + index * 4, element.values[index] ?? 0);
+      }
+      return payload;
+    }
+    case "raw":
+      return new Uint8Array(element.rawElement);
+    case "cvst":
+      throw new Error("Structured serialization for generic MPE curve-set elements is not implemented");
+  }
+}
+
+function serializeGenericMultiProcessTag(value: CmsGenericMultiProcessTagValue): Uint8Array {
+  if (value.elements.some((element) => !canSerializeGenericMpeElement(element))) {
+    return new Uint8Array(value.rawPayload);
+  }
+
+  const elementPayloads = value.elements.map(serializeGenericMpeElement);
+  const directorySize = value.elements.length * 8;
+  let dataOffset = 16 + directorySize;
+  const entries = elementPayloads.map((payload) => {
+    const offset = dataOffset;
+    dataOffset = align4(dataOffset + payload.byteLength);
+    return { offset, size: payload.byteLength, payload };
+  });
+
+  const result = new Uint8Array(dataOffset);
+  writeSignature(result, 0, "mpet");
+  writeU16(result, 8, value.inputChannels);
+  writeU16(result, 10, value.outputChannels);
+  writeU32(result, 12, value.elements.length);
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    writeU32(result, 16 + index * 8, entry.offset);
+    writeU32(result, 16 + index * 8 + 4, entry.size);
+    result.set(entry.payload, entry.offset);
+  }
+
+  return result;
 }
 
 function serializeLut16(value: CmsLut16TagValue): Uint8Array {

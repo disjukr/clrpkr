@@ -7,6 +7,8 @@ import {
   parseIccHeader,
   parseIccLutTag,
   parseIccTagTable,
+  serializeIccLutTag,
+  type CmsGenericMultiProcessTagValue,
   type CmsLut16TagValue,
   type CmsLut8TagValue,
   type CmsMultiProcessElementTagValue,
@@ -88,5 +90,87 @@ describe("ICC LUT tag parsing", () => {
     expect(parsed.outputTables.length).toBe(1024);
     expect(parsed.clutValues.length).toBe(33 ** 3 * 4);
     expect(validateLutTagStructure(parsed, b2a2!.size)).toEqual([]);
+  });
+
+  it("round-trips structured generic mpet elements", () => {
+    const tag: CmsGenericMultiProcessTagValue = {
+      kind: "mpet",
+      inputChannels: 3,
+      outputChannels: 3,
+      rawPayload: new Uint8Array(),
+      elements: [
+        { kind: "bACS" },
+        {
+          kind: "matf",
+          inputChannels: 3,
+          outputChannels: 3,
+          matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+          offset: [0, 0.1, 0.2],
+        },
+        {
+          kind: "clut",
+          inputChannels: 3,
+          outputChannels: 3,
+          gridPoints: [2, 2, 2],
+          values: new Float32Array([
+            0, 0, 0,
+            1, 0, 0,
+            0, 1, 0,
+            1, 1, 0,
+            0, 0, 1,
+            1, 0, 1,
+            0, 1, 1,
+            1, 1, 1,
+          ]),
+        },
+        { kind: "eACS" },
+      ],
+    };
+
+    const payload = serializeIccLutTag(tag);
+    const reparsed = parseIccLutTag(payload, { signature: "D2B0", offset: 0, size: payload.byteLength }) as CmsGenericMultiProcessTagValue;
+
+    expect(reparsed.kind).toBe("mpet");
+    expect(reparsed.inputChannels).toBe(3);
+    expect(reparsed.outputChannels).toBe(3);
+    expect(reparsed.elements).toHaveLength(4);
+    expect(reparsed.elements[0]).toEqual({ kind: "bACS" });
+    expect(reparsed.elements[1]?.kind).toBe("matf");
+    expect(reparsed.elements[2]?.kind).toBe("clut");
+    expect(reparsed.elements[3]).toEqual({ kind: "eACS" });
+  });
+
+  it("preserves unknown generic mpet elements as raw", () => {
+    const rawElement = new Uint8Array(12);
+    rawElement[0] = "f".charCodeAt(0);
+    rawElement[1] = "o".charCodeAt(0);
+    rawElement[2] = "o".charCodeAt(0);
+    rawElement[3] = " ".charCodeAt(0);
+    rawElement[8] = 0xaa;
+    rawElement[9] = 0xbb;
+    rawElement[10] = 0xcc;
+    rawElement[11] = 0xdd;
+
+    const payload = new Uint8Array(16 + 8 + rawElement.byteLength);
+    payload[0] = "m".charCodeAt(0);
+    payload[1] = "p".charCodeAt(0);
+    payload[2] = "e".charCodeAt(0);
+    payload[3] = "t".charCodeAt(0);
+    payload[9] = 3;
+    payload[11] = 3;
+    payload[15] = 1;
+    payload[23] = rawElement.byteLength;
+    payload[19] = 24;
+    payload.set(rawElement, 24);
+
+    const parsed = parseIccLutTag(payload, { signature: "D2B0", offset: 0, size: payload.byteLength }) as CmsGenericMultiProcessTagValue;
+    expect(parsed.elements).toHaveLength(1);
+    expect(parsed.elements[0]?.kind).toBe("raw");
+    if (parsed.elements[0]?.kind !== "raw") {
+      throw new Error("Expected raw element");
+    }
+    expect(parsed.elements[0].signature).toBe("foo ");
+    expect(parsed.elements[0].rawElement).toEqual(rawElement);
+    expect(serializeIccLutTag(parsed)).toEqual(payload);
   });
 });

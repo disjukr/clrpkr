@@ -287,6 +287,7 @@ function buildPipelineFromGenericMpe(tag: CmsGenericMultiProcessTagValue): CmsPi
         break;
       case "bACS":
       case "eACS":
+      case "raw":
         break;
     }
   }
