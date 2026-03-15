@@ -1,3 +1,4 @@
 packages:
   - "lcms-ts"
+  - "icc2sdf"
   - "web"
