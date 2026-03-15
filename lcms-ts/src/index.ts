@@ -9,6 +9,7 @@ export * from "./profile/header.js";
 export * from "./profile/io-base.js";
 export * from "./profile/io-tags.js";
 export * from "./profile/lut.js";
+export * from "./profile/profile.js";
 export * from "./profile/tag-table.js";
 export * from "./profile/tags.js";
 export * from "./tone-curve/index.js";
