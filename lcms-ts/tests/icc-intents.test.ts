@@ -17,31 +17,36 @@ import {
   parseIccHeader,
   parseIccTagTable,
   parseIccTagValue,
+  type CmsProfile,
 } from "../src/index.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 
 function loadProfile(relativePath: string) {
-  const fullPath = path.join(repoRoot, "icc-profiles", relativePath);
+  const fullPath = path.isAbsolute(relativePath) ? relativePath : path.join(repoRoot, "icc-profiles", relativePath);
   const data = readFileSync(fullPath);
   const header = parseIccHeader(data);
   const tags = parseIccTagTable(data, header);
   return { data, header, tags };
 }
 
+function buildProfileFromTags(relativePath: string, signatures: readonly string[]): CmsProfile {
+  const { data, header, tags } = loadProfile(relativePath);
+  return cmsCreateProfilePlaceholder(
+    header,
+    signatures.map((signature) => {
+      const tag = tags.find((entry) => entry.signature === signature);
+      if (!tag) {
+        throw new Error(`Missing tag ${signature}`);
+      }
+      return { signature, value: parseIccTagValue(data, tag) };
+    }),
+  );
+}
+
 describe("ICC intent support", () => {
   it("recognizes RGB matrix-shaper profiles", () => {
-    const { data, header, tags } = loadProfile("eci/eciRGB_v2_ICCv4.icc");
-    const profile = cmsCreateProfilePlaceholder(
-      header,
-      ["rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC"].map((signature) => {
-        const tag = tags.find((entry) => entry.signature === signature);
-        if (!tag) {
-          throw new Error(`Missing tag ${signature}`);
-        }
-        return { signature, value: parseIccTagValue(data, tag) };
-      }),
-    );
+    const profile = buildProfileFromTags("eci/eciRGB_v2_ICCv4.icc", ["rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC"]);
 
     expect(cmsIsMatrixShaper(profile)).toBe(true);
     expect(cmsIsIntentSupported(profile, INTENT_PERCEPTUAL, LCMS_USED_AS_INPUT)).toBe(true);
@@ -49,22 +54,26 @@ describe("ICC intent support", () => {
   });
 
   it("recognizes CLUT-backed CMYK input and output intents", () => {
-    const { data, header, tags } = loadProfile("eci/eciCMYK_v2.icc");
-    const profile = cmsCreateProfilePlaceholder(
-      header,
-      ["A2B0", "B2A0", "B2A2"].map((signature) => {
-        const tag = tags.find((entry) => entry.signature === signature);
-        if (!tag) {
-          throw new Error(`Missing tag ${signature}`);
-        }
-        return { signature, value: parseIccTagValue(data, tag) };
-      }),
-    );
+    const profile = buildProfileFromTags("eci/eciCMYK_v2.icc", ["A2B0", "B2A0", "B2A2"]);
 
     expect(cmsIsCLUT(profile, INTENT_PERCEPTUAL, LCMS_USED_AS_INPUT)).toBe(true);
     expect(cmsIsCLUT(profile, INTENT_PERCEPTUAL, LCMS_USED_AS_OUTPUT)).toBe(true);
     expect(cmsIsCLUT(profile, INTENT_ABSOLUTE_COLORIMETRIC, LCMS_USED_AS_OUTPUT)).toBe(false);
     expect(cmsIsIntentSupported(profile, INTENT_PERCEPTUAL, LCMS_USED_AS_PROOF)).toBe(false);
+  });
+
+  it("treats float LUT tags as CLUT-backed intent support", () => {
+    const base = buildProfileFromTags("eci/eciRGB_v2_ICCv4.icc", ["desc"]);
+    const profile = cmsCreateProfilePlaceholder(base.header, [
+      { signature: "D2B0", rawPayload: new Uint8Array([0]), rawOnly: true },
+      { signature: "B2D0", rawPayload: new Uint8Array([0]), rawOnly: true },
+    ]);
+
+    expect(cmsIsMatrixShaper(profile)).toBe(false);
+    expect(cmsIsCLUT(profile, INTENT_PERCEPTUAL, LCMS_USED_AS_INPUT)).toBe(true);
+    expect(cmsIsCLUT(profile, INTENT_PERCEPTUAL, LCMS_USED_AS_OUTPUT)).toBe(true);
+    expect(cmsIsIntentSupported(profile, INTENT_PERCEPTUAL, LCMS_USED_AS_INPUT)).toBe(true);
+    expect(cmsIsIntentSupported(profile, INTENT_PERCEPTUAL, LCMS_USED_AS_OUTPUT)).toBe(true);
   });
 
   it("uses header rendering intent for devicelink CLUT support", () => {

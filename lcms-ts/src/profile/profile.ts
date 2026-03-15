@@ -45,6 +45,8 @@ export const cmsInfoCopyright = 3;
 
 const DEVICE_TO_PCS_16 = ["A2B0", "A2B1", "A2B2", "A2B1"] as const;
 const PCS_TO_DEVICE_16 = ["B2A0", "B2A1", "B2A2", "B2A1"] as const;
+const DEVICE_TO_PCS_FLOAT = ["D2B0", "D2B1", "D2B2", "D2B3"] as const;
+const PCS_TO_DEVICE_FLOAT = ["B2D0", "B2D1", "B2D2", "B2D3"] as const;
 
 let nextProfileId = 1;
 
@@ -269,15 +271,15 @@ export function cmsIsCLUT(profile: CmsProfile, intent: number, usedDirection: nu
     return profile.header.renderingIntent === intent;
   }
 
+  if (intent < 0 || intent > INTENT_ABSOLUTE_COLORIMETRIC) {
+    return false;
+  }
+
   switch (usedDirection) {
     case LCMS_USED_AS_INPUT:
-      return intent >= 0 && intent <= INTENT_ABSOLUTE_COLORIMETRIC
-        ? cmsIsTag(profile, DEVICE_TO_PCS_16[intent]!)
-        : false;
+      return cmsIsTag(profile, DEVICE_TO_PCS_16[intent]!) || cmsIsTag(profile, DEVICE_TO_PCS_FLOAT[intent]!);
     case LCMS_USED_AS_OUTPUT:
-      return intent >= 0 && intent <= INTENT_ABSOLUTE_COLORIMETRIC
-        ? cmsIsTag(profile, PCS_TO_DEVICE_16[intent]!)
-        : false;
+      return cmsIsTag(profile, PCS_TO_DEVICE_16[intent]!) || cmsIsTag(profile, PCS_TO_DEVICE_FLOAT[intent]!);
     case LCMS_USED_AS_PROOF:
       return (
         cmsIsIntentSupported(profile, intent, LCMS_USED_AS_INPUT) &&
