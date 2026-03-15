@@ -12,7 +12,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(scriptDir);
 const repoDir = dirname(packageDir);
 const iccProfilesDir = join(repoDir, "icc-profiles");
-const outputRootDir = join(packageDir, "tmp", "icc-profiles-nrrd");
+const outputRootDir = join(packageDir, "baked", "xyy");
 
 async function collectIccFiles(rootDir) {
   const entries = await (await import("node:fs/promises")).readdir(rootDir, {
@@ -42,7 +42,6 @@ async function ensureParentDir(pathname) {
 
 async function main() {
   const files = await collectIccFiles(iccProfilesDir);
-  const failures = [];
   let converted = 0;
   const runtime = await createNodeGpuRuntime();
   const device = await runtime.requestDevice();
@@ -83,27 +82,11 @@ async function main() {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      failures.push({ file: relativePath, error: message });
       console.warn(`[fail] ${relativePath}: ${message}`);
     }
   }
 
-  const summaryPath = join(outputRootDir, "summary.json");
-  await writeFile(
-    summaryPath,
-    JSON.stringify(
-      {
-        converted,
-        failed: failures.length,
-        failures,
-      },
-      null,
-      2,
-    ),
-  );
-
   console.log(`Converted ${converted}/${files.length} ICC files.`);
-  console.log(`Summary: ${summaryPath}`);
 
   device.destroy();
 }

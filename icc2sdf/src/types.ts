@@ -82,6 +82,7 @@ export interface IccSdfBuildConfig {
 export interface OccupancyToSdfConfig {
   distanceUnit?: "voxels" | "xyY";
   insideNegative?: boolean;
+  blur?: SdfGaussianBlurConfig | false;
 }
 
 export interface GpuBuildOptions {

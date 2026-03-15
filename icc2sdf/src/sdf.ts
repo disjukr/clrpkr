@@ -1,6 +1,7 @@
 import type {
   OccupancyGrid,
   OccupancyToSdfConfig,
+  SdfGaussianBlurConfig,
   SdfVolume,
 } from "./types.js";
 
@@ -167,6 +168,90 @@ function computeSquaredDistanceField(
   return passZ;
 }
 
+function getEffectiveBlurConfig(
+  blur: OccupancyToSdfConfig["blur"],
+): SdfGaussianBlurConfig | null {
+  if (blur === false) {
+    return null;
+  }
+  return blur ?? { radiusVoxels: 1, sigma: 1 };
+}
+
+function gaussianWeightsForRadiusOne(sigma: number): readonly [number, number] {
+  const center = 1;
+  const side = Math.exp(-1 / (2 * sigma * sigma));
+  const norm = center + side * 2;
+  return [center / norm, side / norm];
+}
+
+function blurAxisRadiusOne(
+  source: Float32Array,
+  target: Float32Array,
+  width: number,
+  height: number,
+  depth: number,
+  axis: "x" | "y" | "z",
+  centerWeight: number,
+  sideWeight: number,
+): void {
+  const clamp = (value: number, max: number): number => {
+    if (value < 0) {
+      return 0;
+    }
+    if (value > max) {
+      return max;
+    }
+    return value;
+  };
+
+  for (let z = 0; z < depth; z += 1) {
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const prevIndex =
+          axis === "x"
+            ? gridIndex(width, height, clamp(x - 1, width - 1), y, z)
+            : axis === "y"
+              ? gridIndex(width, height, x, clamp(y - 1, height - 1), z)
+              : gridIndex(width, height, x, y, clamp(z - 1, depth - 1));
+        const nextIndex =
+          axis === "x"
+            ? gridIndex(width, height, clamp(x + 1, width - 1), y, z)
+            : axis === "y"
+              ? gridIndex(width, height, x, clamp(y + 1, height - 1), z)
+              : gridIndex(width, height, x, y, clamp(z + 1, depth - 1));
+        const centerIndex = gridIndex(width, height, x, y, z);
+        const prev = source[prevIndex] ?? 0;
+        const center = source[centerIndex] ?? 0;
+        const next = source[nextIndex] ?? 0;
+        target[centerIndex] = center * centerWeight + (prev + next) * sideWeight;
+      }
+    }
+  }
+}
+
+export function applyGaussianBlurToSdfVolume(
+  data: Float32Array,
+  width: number,
+  height: number,
+  depth: number,
+  blur: SdfGaussianBlurConfig | false | undefined,
+): Float32Array {
+  const effectiveBlur = getEffectiveBlurConfig(blur);
+  if (effectiveBlur == null) {
+    return data;
+  }
+
+  const [centerWeight, sideWeight] = gaussianWeightsForRadiusOne(effectiveBlur.sigma);
+  const passX = new Float32Array(data.length);
+  const passY = new Float32Array(data.length);
+  const passZ = new Float32Array(data.length);
+
+  blurAxisRadiusOne(data, passX, width, height, depth, "x", centerWeight, sideWeight);
+  blurAxisRadiusOne(passX, passY, width, height, depth, "y", centerWeight, sideWeight);
+  blurAxisRadiusOne(passY, passZ, width, height, depth, "z", centerWeight, sideWeight);
+  return passZ;
+}
+
 export function occupancyGridToSdfVolume(
   occupancy: OccupancyGrid,
   config: OccupancyToSdfConfig = {},
@@ -215,12 +300,14 @@ export function occupancyGridToSdfVolume(
     data[index] = insideNegative ? signedDistance : -signedDistance;
   }
 
+  const blurredData = applyGaussianBlurToSdfVolume(data, width, height, depth, config.blur);
+
   return {
     metadata: {
       dimensions: occupancy.metadata.dimensions,
       bounds,
       spacing,
     },
-    data,
+    data: blurredData,
   };
 }

@@ -12,9 +12,11 @@ type ApiResponse = {
   end(data?: Uint8Array | string): void;
 };
 
-const NRRD_ROOT = path.resolve(process.cwd(), "../icc2sdf/tmp/icc-profiles-nrrd");
+const NRRD_ROOT = path.resolve(process.cwd(), "../icc2sdf/baked");
 
-function normalizeRelativePath(value: string | string[] | undefined): string | null {
+function normalizeRelativePath(
+  value: string | string[] | undefined,
+): string | null {
   const raw = Array.isArray(value) ? value[0] : value;
   if (!raw) {
     return null;
@@ -29,7 +31,10 @@ function normalizeRelativePath(value: string | string[] | undefined): string | n
   return normalized;
 }
 
-export default async function handler(req: ApiRequest, res: ApiResponse): Promise<void> {
+export default async function handler(
+  req: ApiRequest,
+  res: ApiResponse,
+): Promise<void> {
   const relativePath = normalizeRelativePath(req.query?.path);
   if (!relativePath) {
     res.status(400).json({ error: "Invalid NRRD preset path" });

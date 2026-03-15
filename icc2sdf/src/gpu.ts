@@ -6,6 +6,7 @@ import type {
   SdfVolume,
 } from "./types.js";
 import { buildXyyLatticesFromIcc } from "./occupancy.js";
+import { applyGaussianBlurToSdfVolume } from "./sdf.js";
 
 const MAX_GPU_LINE_LENGTH = 256;
 
@@ -734,7 +735,14 @@ export async function occupancyGridToSdfVolumeOnGpu(
     device.queue.submit([encoder.finish()]);
   }
 
-  const data = new Float32Array(await readBuffer(device, outputBuffer, voxelCount * 4));
+  const rawData = new Float32Array(await readBuffer(device, outputBuffer, voxelCount * 4));
+  const data = applyGaussianBlurToSdfVolume(
+    rawData,
+    width,
+    height,
+    depth,
+    options.blur,
+  );
 
   dimsBuffer.destroy();
   occupancyBuffer.destroy();

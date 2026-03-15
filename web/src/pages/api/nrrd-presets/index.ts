@@ -13,7 +13,7 @@ type NrrdPreset = {
   readonly fileName: string;
 };
 
-const NRRD_ROOT = path.resolve(process.cwd(), "../icc2sdf/tmp/icc-profiles-nrrd");
+const NRRD_ROOT = path.resolve(process.cwd(), "../icc2sdf/baked");
 
 async function collectVolumes(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -34,11 +34,16 @@ async function collectVolumes(directory: string): Promise<string[]> {
   return files;
 }
 
-export default async function handler(_req: unknown, res: ApiResponse): Promise<void> {
+export default async function handler(
+  _req: unknown,
+  res: ApiResponse,
+): Promise<void> {
   const files = await collectVolumes(NRRD_ROOT);
   const presets: NrrdPreset[] = files
     .map((absolutePath) => {
-      const relativePath = path.relative(NRRD_ROOT, absolutePath).replace(/\\/g, "/");
+      const relativePath = path
+        .relative(NRRD_ROOT, absolutePath)
+        .replace(/\\/g, "/");
       return {
         path: relativePath,
         label: relativePath,

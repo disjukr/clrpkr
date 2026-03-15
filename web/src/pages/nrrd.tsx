@@ -27,7 +27,6 @@ import {
 } from "three";
 import { parseNrrd } from "../../../icc2sdf/dist/src/nrrd.js";
 import type { NrrdVolume } from "../../../icc2sdf/dist/src/types.js";
-import { CIE_1931_SPECTRAL_LOCUS } from "../lib/cie1931SpectralLocus.js";
 
 type NrrdPreset = {
   readonly path: string;
@@ -458,6 +457,7 @@ function createVolumeRaymarchMaterial(
   volume: NrrdVolume<Float32Array>,
   maxAbs: number,
   isoThreshold: number,
+  projectionMode: ProjectionMode,
 ): ShaderMaterial {
   const {
     metadata: {
@@ -498,7 +498,8 @@ function createVolumeRaymarchMaterial(
       texelSize: { value: [1 / Math.max(width, 1), 1 / Math.max(height, 1), 1 / Math.max(depth, 1)] },
       maxAbs: { value: Math.max(maxAbs, 0.0001) },
       isoThreshold: { value: Math.max(isoThreshold, 0.0001) },
-      stepCount: { value: 320 },
+      stepCount: { value: 256 },
+      orthographicProjection: { value: projectionMode === "orthographic" ? 1 : 0 },
     },
     vertexShader: `
       out vec3 vLocalPosition;
@@ -521,6 +522,7 @@ function createVolumeRaymarchMaterial(
       uniform float maxAbs;
       uniform float isoThreshold;
       uniform float stepCount;
+      uniform float orthographicProjection;
 
       in vec3 vLocalPosition;
       out vec4 outColor;
@@ -584,7 +586,7 @@ function createVolumeRaymarchMaterial(
       }
 
       vec3 sampleGradient(vec3 localPoint) {
-        vec3 eps = texelSize;
+        vec3 eps = texelSize * 2.0;
         float dx = sampleSdf(localPoint + vec3(eps.x, 0.0, 0.0)) - sampleSdf(localPoint - vec3(eps.x, 0.0, 0.0));
         float dy = sampleSdf(localPoint + vec3(0.0, eps.y, 0.0)) - sampleSdf(localPoint - vec3(0.0, eps.y, 0.0));
         float dz = sampleSdf(localPoint + vec3(0.0, 0.0, eps.z)) - sampleSdf(localPoint - vec3(0.0, 0.0, eps.z));
@@ -620,24 +622,18 @@ function createVolumeRaymarchMaterial(
         return 0.5 * (a + b);
       }
 
-      float findClosestSurfaceT(vec3 rayOrigin, vec3 rayDir, float nearT, float farT) {
-        float bestT = nearT;
-        float bestAbs = 1e9;
-        for (int i = 0; i < 10; i++) {
-          float u = float(i) / 9.0;
-          float t = mix(nearT, farT, u);
-          float candidate = abs(sampleSdf(rayOrigin + rayDir * t));
-          if (candidate < bestAbs) {
-            bestAbs = candidate;
-            bestT = t;
-          }
-        }
-        return bestT;
-      }
-
       void main() {
-        vec3 rayOrigin = (inverseModelMatrix * vec4(cameraPosition, 1.0)).xyz;
-        vec3 rayDir = normalize(vLocalPosition - rayOrigin);
+        vec3 rayOrigin;
+        vec3 rayDir;
+
+        if (orthographicProjection > 0.5) {
+          vec3 worldViewDir = normalize(inverse(mat3(viewMatrix)) * vec3(0.0, 0.0, -1.0));
+          rayDir = normalize((inverseModelMatrix * vec4(worldViewDir, 0.0)).xyz);
+          rayOrigin = vLocalPosition - rayDir * 0.0005;
+        } else {
+          rayOrigin = (inverseModelMatrix * vec4(cameraPosition, 1.0)).xyz;
+          rayDir = normalize(vLocalPosition - rayOrigin);
+        }
         vec2 hit = intersectBox(rayOrigin, rayDir);
 
         if (hit.x > hit.y || hit.y < 0.0) {
@@ -646,12 +642,12 @@ function createVolumeRaymarchMaterial(
 
         float t = max(hit.x, 0.0);
         float tEnd = hit.y;
-        float hitThreshold = max(isoThreshold * 0.24, 0.002);
-        float baseStep = max((tEnd - t) / max(stepCount, 1.0), 0.0008);
+        float hitThreshold = max(isoThreshold * 0.2, 0.0015);
+        float baseStep = max((tEnd - t) / max(stepCount, 1.0), 0.001);
+        float previousT = t;
         float previousSdf = sampleSdf(rayOrigin + rayDir * t);
-        float previousAbsSdf = abs(previousSdf);
 
-        if (previousAbsSdf <= hitThreshold) {
+        if (abs(previousSdf) <= hitThreshold) {
           outColor = shadeSurface(rayOrigin, rayOrigin + rayDir * t);
           return;
         }
@@ -661,30 +657,21 @@ function createVolumeRaymarchMaterial(
             break;
           }
 
+          t += baseStep;
           vec3 samplePoint = rayOrigin + rayDir * t;
           float sdf = sampleSdf(samplePoint);
-          float absSdf = abs(sdf);
           bool crossedIso = sdf * previousSdf < 0.0;
 
-          if (absSdf <= hitThreshold || crossedIso || previousAbsSdf <= hitThreshold) {
-            if (crossedIso) {
-              float refinedT = refineSurfaceHit(rayOrigin, rayDir, max(t - baseStep, hit.x), t);
-              outColor = shadeSurface(rayOrigin, rayOrigin + rayDir * refinedT);
-              return;
-            }
-            float closestT = findClosestSurfaceT(
-              rayOrigin,
-              rayDir,
-              max(t - baseStep, hit.x),
-              min(t + baseStep, tEnd)
-            );
-            outColor = shadeSurface(rayOrigin, rayOrigin + rayDir * closestT);
+          if (abs(sdf) <= hitThreshold || crossedIso) {
+            float refinedT = crossedIso
+              ? refineSurfaceHit(rayOrigin, rayDir, max(previousT, hit.x), t)
+              : t;
+            outColor = shadeSurface(rayOrigin, rayOrigin + rayDir * refinedT);
             return;
           }
 
+          previousT = t;
           previousSdf = sdf;
-          previousAbsSdf = absSdf;
-          t += baseStep;
         }
         
         discard;
@@ -697,6 +684,7 @@ function VolumeRaymarch(props: {
   readonly volume: NrrdVolume<Float32Array>;
   readonly maxAbs: number;
   readonly isoThreshold: number;
+  readonly projectionMode: ProjectionMode;
 }) {
   const meshRef = useRef<{
     updateMatrixWorld(force?: boolean): void;
@@ -704,8 +692,15 @@ function VolumeRaymarch(props: {
   } | null>(null);
   const texture = useMemo(() => createVolumeTexture(props.volume), [props.volume]);
   const material = useMemo(
-    () => createVolumeRaymarchMaterial(texture, props.volume, props.maxAbs, props.isoThreshold),
-    [props.isoThreshold, props.maxAbs, props.volume, texture],
+    () =>
+      createVolumeRaymarchMaterial(
+        texture,
+        props.volume,
+        props.maxAbs,
+        props.isoThreshold,
+        props.projectionMode,
+      ),
+    [props.isoThreshold, props.maxAbs, props.projectionMode, props.volume, texture],
   );
 
   useEffect(() => () => texture.dispose(), [texture]);
@@ -713,7 +708,8 @@ function VolumeRaymarch(props: {
   useEffect(() => {
     material.uniforms.maxAbs.value = Math.max(props.maxAbs, 0.0001);
     material.uniforms.isoThreshold.value = Math.max(props.isoThreshold, 0.0001);
-  }, [material, props.isoThreshold, props.maxAbs]);
+    material.uniforms.orthographicProjection.value = props.projectionMode === "orthographic" ? 1 : 0;
+  }, [material, props.isoThreshold, props.maxAbs, props.projectionMode]);
   useEffect(() => {
     meshRef.current?.updateMatrixWorld(true);
     const mesh = meshRef.current;
@@ -1097,7 +1093,7 @@ function XyyAxes(props: {
   const sizeY = displaySteps.y * Math.max(1, height - 1);
   const sizeZ = displaySteps.Y * Math.max(1, depth - 1);
   const maxSize = Math.max(sizeX, sizeY, sizeZ, 0.001);
-  const labelPadding = maxSize * 0.04;
+  const labelPadding = maxSize * 0.075;
   const labelFontSize = maxSize * 0.08;
   const sphereRadius = maxSize * 0.012;
 
@@ -1355,6 +1351,7 @@ function VolumeScene(props: {
             volume={props.volume}
             maxAbs={props.maxAbs}
             isoThreshold={props.isoThreshold}
+            projectionMode={props.projectionMode}
           />
         ) : (
           <>
@@ -1424,13 +1421,11 @@ export default function NrrdRoute() {
   const [selectedPreset, setSelectedPreset] = useState("");
   const [windowScale, setWindowScale] = useState(0.2);
   const [surfaceScale, setSurfaceScale] = useState(0.03);
-  const [renderMode, setRenderMode] = useState<RenderMode>("slices");
-  const [projectionMode, setProjectionMode] = useState<ProjectionMode>("perspective");
+  const [renderMode, setRenderMode] = useState<RenderMode>("raymarch");
+  const [projectionMode, setProjectionMode] = useState<ProjectionMode>("orthographic");
   const [povDegrees, setPovDegrees] = useState(36);
   const [horseshoeLuminance, setHorseshoeLuminance] = useState(0);
-  const [spectralLocus, setSpectralLocus] = useState<ReadonlyArray<SpectralLocusPoint>>(
-    CIE_1931_SPECTRAL_LOCUS,
-  );
+  const [spectralLocus, setSpectralLocus] = useState<ReadonlyArray<SpectralLocusPoint>>([]);
   const [xSlice, setXSlice] = useState(0);
   const [ySlice, setYSlice] = useState(0);
   const [zSlice, setZSlice] = useState(0);
@@ -1480,7 +1475,7 @@ export default function NrrdRoute() {
         }
       } catch {
         if (!cancelled) {
-          setSpectralLocus(CIE_1931_SPECTRAL_LOCUS);
+          setSpectralLocus([]);
         }
       }
     }
