@@ -3,6 +3,9 @@
   "private": true,
   "packageManager": "pnpm@9.15.4",
   "scripts": {
+    "icc:download:all": "pnpm icc:download:color && pnpm icc:download:eci",
+    "icc:download:color": "node icc-profiles/scripts/download-color.mjs",
+    "icc:download:eci": "node icc-profiles/scripts/download-eci.mjs",
     "dev:web": "pnpm --filter web dev",
     "build:web": "pnpm --filter web build",
     "preview:web": "pnpm --filter web preview"
