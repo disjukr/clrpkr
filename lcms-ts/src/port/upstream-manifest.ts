@@ -84,7 +84,7 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     category: "profile-io",
     targetModule: "src/profile/io-tags.ts",
     status: "in-progress",
-    notes: "Tag-level serialization is in progress for desc/text/mluc/XYZ/curv/para and LUT payloads, with an initial in-memory profile assembler.",
+    notes: "Supported tag payload serialization, profile info lookup, intent/LUT selection, devicelink lookup, and gray/RGB matrix-shaper fallbacks are in place; float and named-color paths remain.",
   },
   {
     upstreamSource: "cmslut.c",

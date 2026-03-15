@@ -1,7 +1,7 @@
 import type { CmsHandle } from "../types/primitives.js";
 import { serializeIccHeader, type CmsIccHeader } from "./header.js";
 import { buildSerializedTagTable, serializeIccTagRecord, type CmsSerializedTagRecord } from "./io-tags.js";
-import { parseIccTagValue, type CmsParsedTagValue } from "./tags.js";
+import { parseIccTagValue, type CmsMlucTagValue, type CmsParsedTagValue } from "./tags.js";
 import { parseIccHeader } from "./header.js";
 import { parseIccTagTable, type CmsIccTagEntry } from "./tag-table.js";
 
@@ -30,6 +30,10 @@ export const INTENT_PERCEPTUAL = 0;
 export const INTENT_RELATIVE_COLORIMETRIC = 1;
 export const INTENT_SATURATION = 2;
 export const INTENT_ABSOLUTE_COLORIMETRIC = 3;
+export const cmsInfoDescription = 0;
+export const cmsInfoManufacturer = 1;
+export const cmsInfoModel = 2;
+export const cmsInfoCopyright = 3;
 
 const DEVICE_TO_PCS_16 = ["A2B0", "A2B1", "A2B2", "A2B1"] as const;
 const PCS_TO_DEVICE_16 = ["B2A0", "B2A1", "B2A2", "B2A1"] as const;
@@ -265,6 +269,45 @@ export function cmsWriteRawTag(profile: CmsProfile, signature: string, payload: 
   return cmsWriteTag(profile, signature, parsed);
 }
 
+export function cmsGetProfileInfo(
+  profile: CmsProfile,
+  info: number,
+  languageCode = "en",
+  countryCode = "US",
+): string | undefined {
+  const tag = getInfoTag(profile, info);
+  if (!tag) {
+    return undefined;
+  }
+
+  switch (tag.kind) {
+    case "desc":
+    case "text":
+      return tag.text;
+    case "mluc":
+      return getLocalizedText(tag, languageCode, countryCode);
+  }
+}
+
+export function cmsGetProfileInfoASCII(
+  profile: CmsProfile,
+  info: number,
+  languageCode = "en",
+  countryCode = "US",
+): string | undefined {
+  const text = cmsGetProfileInfo(profile, info, languageCode, countryCode);
+  return text === undefined ? undefined : asciiFallback(text);
+}
+
+export function cmsGetProfileInfoUTF8(
+  profile: CmsProfile,
+  info: number,
+  languageCode = "en",
+  countryCode = "US",
+): string | undefined {
+  return cmsGetProfileInfo(profile, info, languageCode, countryCode);
+}
+
 function rebuildProfile(profile: CmsProfile, records: readonly CmsIccProfileRecord[]): CmsProfile {
   const serialized = serializeIccProfile(
     profile.header,
@@ -280,4 +323,43 @@ function rebuildProfile(profile: CmsProfile, records: readonly CmsIccProfileReco
 
 function serializeProfileRecord(record: CmsIccProfileRecord): CmsSerializedTagRecord {
   return serializeIccTagRecord(record.signature, record.value, record.linkedTo ?? record.signature);
+}
+
+function getInfoTag(profile: CmsProfile, info: number): Extract<CmsParsedTagValue, { kind: "desc" | "text" | "mluc" }> | undefined {
+  let signature: string;
+
+  switch (info) {
+    case cmsInfoDescription:
+      signature = cmsIsTag(profile, "dscm") ? "dscm" : "desc";
+      break;
+    case cmsInfoManufacturer:
+      signature = "dmnd";
+      break;
+    case cmsInfoModel:
+      signature = "dmdd";
+      break;
+    case cmsInfoCopyright:
+      signature = "cprt";
+      break;
+    default:
+      return undefined;
+  }
+
+  const tag = cmsReadTag(profile, signature);
+  return tag?.kind === "desc" || tag?.kind === "text" || tag?.kind === "mluc" ? tag : undefined;
+}
+
+function getLocalizedText(tag: CmsMlucTagValue, languageCode: string, countryCode: string): string | undefined {
+  const normalizedLanguage = languageCode.slice(0, 2).toLowerCase();
+  const normalizedCountry = countryCode.slice(0, 2).toUpperCase();
+
+  return (
+    tag.entries.find((entry) => entry.language.toLowerCase() === normalizedLanguage && entry.country.toUpperCase() === normalizedCountry)?.text ??
+    tag.entries.find((entry) => entry.language.toLowerCase() === normalizedLanguage)?.text ??
+    tag.entries[0]?.text
+  );
+}
+
+function asciiFallback(text: string): string {
+  return Array.from(text, (char) => (char.charCodeAt(0) <= 0x7f ? char : "?")).join("");
 }
