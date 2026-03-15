@@ -16,6 +16,7 @@ export interface CmsIccProfileRecord {
 
 export interface CmsProfile extends CmsHandle<"profile"> {
   readonly header: CmsIccHeader;
+  readonly tags: readonly CmsIccTagEntry[];
   readonly records: readonly CmsIccProfileRecord[];
 }
 
@@ -85,33 +86,31 @@ export function parseIccProfile(data: Uint8Array): {
 } {
   const header = parseIccHeader(data);
   const tags = parseIccTagTable(data, header);
-  const payloadOwners = new Map<string, string>();
+  const parsedOwners = new Map<string, CmsIccProfileRecord>();
 
   return {
     header,
     tags,
     records: tags.map((tag) => {
-      const payloadKey = `${tag.offset}:${tag.size}`;
-      const linkedTo = payloadOwners.get(payloadKey);
-      if (!linkedTo) {
-        payloadOwners.set(payloadKey, tag.signature);
-      }
-
       const rawPayload = data.slice(tag.offset, tag.offset + tag.size);
+      const payloadKey = `${tag.offset}:${tag.size}`;
 
       try {
-        return {
+        const value = parseIccTagValue(data, tag);
+        const owner = parsedOwners.get(payloadKey);
+        const record = {
           signature: tag.signature,
-          value: parseIccTagValue(data, tag),
+          value,
           rawPayload,
-          ...(linkedTo ? { linkedTo } : {}),
+          ...(owner && areTagSignaturesLinkCompatible(owner.signature, tag.signature) ? { linkedTo: owner.signature } : {}),
         };
+        parsedOwners.set(payloadKey, record);
+        return record;
       } catch {
         return {
           signature: tag.signature,
           rawPayload,
           rawOnly: true,
-          ...(linkedTo ? { linkedTo } : {}),
         };
       }
     }),
@@ -124,6 +123,7 @@ export function cmsOpenProfileFromMem(data: Uint8Array): CmsProfile {
     id: `profile-${nextProfileId++}`,
     kind: "profile",
     header: parsed.header,
+    tags: parsed.tags,
     records: parsed.records,
   };
 }
@@ -136,6 +136,7 @@ export function cmsCreateProfilePlaceholder(
     id: `profile-${nextProfileId++}`,
     kind: "profile" as const,
     header,
+    tags: [],
     records: [...records],
   };
   const serialized = serializeIccProfile(
@@ -147,6 +148,7 @@ export function cmsCreateProfilePlaceholder(
     id: profile.id,
     kind: profile.kind,
     header: serialized.header,
+    tags: serialized.tags,
     records: [...records],
   };
 }
@@ -229,11 +231,7 @@ export function cmsGetTagOffsetAndSize(
   profile: CmsProfile,
   signature: string,
 ): { offset: number; size: number } | undefined {
-  const serialized = serializeIccProfile(
-    profile.header,
-    profile.records.map((record) => serializeProfileRecord(profile, record)),
-  );
-  const entry = serialized.tags.find((tag) => tag.signature === signature);
+  const entry = profile.tags.find((tag) => tag.signature === signature);
   return entry ? { offset: entry.offset, size: entry.size } : undefined;
 }
 
@@ -356,6 +354,7 @@ function rebuildProfile(profile: CmsProfile, records: readonly CmsIccProfileReco
   return {
     ...profile,
     header: serialized.header,
+    tags: serialized.tags,
     records: [...records],
   };
 }
@@ -373,12 +372,13 @@ function serializeProfileRecord(profile: CmsProfileRecordView, record: CmsIccPro
   if (!target) {
     throw new Error(`Missing tag ${record.signature}`);
   }
+  const payloadKey = getSerializedPayloadKey(profile, record);
 
   if (target.rawPayload) {
     return {
       signature: record.signature,
       payload: new Uint8Array(target.rawPayload),
-      payloadKey: target.linkedTo ?? target.signature,
+      ...(payloadKey ? { payloadKey } : {}),
     };
   }
 
@@ -386,7 +386,11 @@ function serializeProfileRecord(profile: CmsProfileRecordView, record: CmsIccPro
     throw new Error(`Tag ${record.signature} has no parsed value`);
   }
 
-  return serializeIccTagRecord(record.signature, target.value, target.linkedTo ?? target.signature);
+  return serializeIccTagRecord(
+    record.signature,
+    target.value,
+    payloadKey,
+  );
 }
 
 function profileFromRecords(profile: CmsProfileRecordView, records: readonly CmsIccProfileRecord[]): CmsProfileRecordView {
@@ -397,6 +401,61 @@ function profileFromRecords(profile: CmsProfileRecordView, records: readonly Cms
 
 function getDirectRecord(profile: CmsProfileRecordView, signature: string): CmsIccProfileRecord | undefined {
   return profile.records.find((record) => record.signature === signature);
+}
+
+function getSerializedPayloadKey(profile: CmsProfileRecordView, record: CmsIccProfileRecord): string | undefined {
+  if (record.linkedTo) {
+    return resolveLinkedRootSignature(profile, record.linkedTo);
+  }
+
+  return profile.records.some((candidate) => candidate.linkedTo === record.signature) ? record.signature : undefined;
+}
+
+function resolveLinkedRootSignature(profile: CmsProfileRecordView, signature: string): string {
+  const seen = new Set<string>();
+  let current = signature;
+
+  while (true) {
+    if (seen.has(current)) {
+      throw new Error(`Circular tag link detected for ${signature}`);
+    }
+    seen.add(current);
+
+    const record = getDirectRecord(profile, current);
+    if (!record?.linkedTo) {
+      return current;
+    }
+    current = record.linkedTo;
+  }
+}
+
+function areTagSignaturesLinkCompatible(left: string, right: string): boolean {
+  const leftGroup = getTagLinkCompatibilityGroup(left);
+  return leftGroup !== undefined && leftGroup === getTagLinkCompatibilityGroup(right);
+}
+
+function getTagLinkCompatibilityGroup(signature: string): string | undefined {
+  if (signature === "rTRC" || signature === "gTRC" || signature === "bTRC" || signature === "kTRC") {
+    return "TRC";
+  }
+
+  if (signature === "rXYZ" || signature === "gXYZ" || signature === "bXYZ" || signature === "lumi") {
+    return "XYZ";
+  }
+
+  if (signature === "A2B0" || signature === "A2B1" || signature === "A2B2" || signature === "D2B0" || signature === "D2B1" || signature === "D2B2" || signature === "D2B3") {
+    return "DEVICE_TO_PCS";
+  }
+
+  if (signature === "B2A0" || signature === "B2A1" || signature === "B2A2" || signature === "B2D0" || signature === "B2D1" || signature === "B2D2" || signature === "B2D3") {
+    return "PCS_TO_DEVICE";
+  }
+
+  if (signature === "pre0" || signature === "pre1" || signature === "pre2") {
+    return "PREVIEW";
+  }
+
+  return undefined;
 }
 
 function resolveRecord(profile: CmsProfileRecordView, signature: string): CmsIccProfileRecord | undefined {
