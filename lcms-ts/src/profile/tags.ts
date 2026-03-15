@@ -1,5 +1,6 @@
 import { cmsBuildParametricToneCurve, cmsBuildTabulatedToneCurve16, type CmsToneCurve } from "../tone-curve/index.js";
 import type { CmsIccXYZNumber } from "./header.js";
+import { readS15Fixed16, readSignature, readU16, readU32, sliceIccRange } from "./io-base.js";
 import { parseIccLutTag, type CmsParsedLutTagValue } from "./lut.js";
 import type { CmsIccTagEntry } from "./tag-table.js";
 
@@ -51,15 +52,6 @@ export type CmsParsedTagValue =
   | CmsTextTagValue
   | CmsXyzTagValue;
 
-function readTagType(data: Uint8Array, offset: number): string {
-  return String.fromCharCode(
-    data[offset]!,
-    data[offset + 1]!,
-    data[offset + 2]!,
-    data[offset + 3]!,
-  );
-}
-
 function readAscii(data: Uint8Array, offset: number, length: number): string {
   let text = "";
   for (let i = 0; i < length; i += 1) {
@@ -76,18 +68,6 @@ function readUtf16Be(data: Uint8Array, offset: number, length: number): string {
   return String.fromCharCode(...chars).replace(/\0+$/u, "");
 }
 
-function readU32(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(offset, false);
-}
-
-function readU16(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(offset, false);
-}
-
-function readS15Fixed16(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getInt32(offset, false) / 65536;
-}
-
 function trimTrailingNul(text: string): string {
   return text.replace(/\0+$/u, "");
 }
@@ -97,8 +77,8 @@ export function getTagEntry(tags: readonly CmsIccTagEntry[], signature: string):
 }
 
 export function parseIccTagValue(data: Uint8Array, tag: CmsIccTagEntry): CmsParsedTagValue {
-  const payload = data.slice(tag.offset, tag.offset + tag.size);
-  const type = readTagType(payload, 0);
+  const payload = sliceIccRange(data, tag.offset, tag.size, `Tag ${tag.signature}`);
+  const type = readSignature(payload, 0);
 
   switch (type) {
     case "desc":

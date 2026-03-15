@@ -1,11 +1,13 @@
-export interface CmsIccDateTime {
-  readonly year: number;
-  readonly month: number;
-  readonly day: number;
-  readonly hours: number;
-  readonly minutes: number;
-  readonly seconds: number;
-}
+import {
+  readDateTime,
+  readProfileId,
+  readS15Fixed16,
+  readSignature,
+  readU32,
+  readU64,
+  writeProfileId,
+  type CmsIccDateTime,
+} from "./io-base.js";
 
 export interface CmsIccXYZNumber {
   readonly X: number;
@@ -48,68 +50,74 @@ const KNOWN_DEVICE_CLASSES = new Set([
 
 const KNOWN_PCS = new Set(["XYZ ", "Lab "]);
 
-function readSignature(view: DataView, offset: number): string {
-  return String.fromCharCode(
-    view.getUint8(offset),
-    view.getUint8(offset + 1),
-    view.getUint8(offset + 2),
-    view.getUint8(offset + 3),
-  );
-}
-
-function readDateTime(view: DataView, offset: number): CmsIccDateTime {
-  return {
-    year: view.getUint16(offset, false),
-    month: view.getUint16(offset + 2, false),
-    day: view.getUint16(offset + 4, false),
-    hours: view.getUint16(offset + 6, false),
-    minutes: view.getUint16(offset + 8, false),
-    seconds: view.getUint16(offset + 10, false),
-  };
-}
-
-function readS15Fixed16(view: DataView, offset: number): number {
-  return view.getInt32(offset, false) / 65536;
-}
-
-function readProfileId(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 export function parseIccHeader(data: Uint8Array): CmsIccHeader {
   if (data.byteLength < 132) {
     throw new Error(`ICC data is too short: expected at least 132 bytes, got ${data.byteLength}`);
   }
 
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const versionRaw = view.getUint32(8, false);
+  const versionRaw = readU32(data, 8);
 
   return {
-    profileSize: view.getUint32(0, false),
-    preferredCmmType: readSignature(view, 4),
+    profileSize: readU32(data, 0),
+    preferredCmmType: readSignature(data, 4),
     versionMajor: (versionRaw >>> 24) & 0xff,
     versionMinor: (versionRaw >>> 20) & 0x0f,
     versionBugfix: (versionRaw >>> 16) & 0x0f,
-    deviceClass: readSignature(view, 12),
-    colorSpace: readSignature(view, 16),
-    pcs: readSignature(view, 20),
-    createdAt: readDateTime(view, 24),
-    magic: readSignature(view, 36),
-    platform: readSignature(view, 40),
-    flags: view.getUint32(44, false),
-    manufacturer: readSignature(view, 48),
-    model: readSignature(view, 52),
-    attributes: view.getBigUint64(56, false),
-    renderingIntent: view.getUint32(64, false),
+    deviceClass: readSignature(data, 12),
+    colorSpace: readSignature(data, 16),
+    pcs: readSignature(data, 20),
+    createdAt: readDateTime(data, 24),
+    magic: readSignature(data, 36),
+    platform: readSignature(data, 40),
+    flags: readU32(data, 44),
+    manufacturer: readSignature(data, 48),
+    model: readSignature(data, 52),
+    attributes: readU64(data, 56),
+    renderingIntent: readU32(data, 64),
     illuminant: {
-      X: readS15Fixed16(view, 68),
-      Y: readS15Fixed16(view, 72),
-      Z: readS15Fixed16(view, 76),
+      X: readS15Fixed16(data, 68),
+      Y: readS15Fixed16(data, 72),
+      Z: readS15Fixed16(data, 76),
     },
-    creator: readSignature(view, 80),
+    creator: readSignature(data, 80),
     profileId: readProfileId(data.slice(84, 100)),
-    tagCount: view.getUint32(128, false),
+    tagCount: readU32(data, 128),
   };
+}
+
+export function serializeIccHeader(header: CmsIccHeader): Uint8Array {
+  const data = new Uint8Array(132);
+  const versionRaw =
+    ((header.versionMajor & 0xff) << 24) |
+    ((header.versionMinor & 0x0f) << 20) |
+    ((header.versionBugfix & 0x0f) << 16);
+
+  new DataView(data.buffer).setUint32(0, header.profileSize, false);
+  data.set(new TextEncoder().encode(header.preferredCmmType), 4);
+  new DataView(data.buffer).setUint32(8, versionRaw >>> 0, false);
+  data.set(new TextEncoder().encode(header.deviceClass), 12);
+  data.set(new TextEncoder().encode(header.colorSpace), 16);
+  data.set(new TextEncoder().encode(header.pcs), 20);
+  new DataView(data.buffer).setUint16(24, header.createdAt.year, false);
+  new DataView(data.buffer).setUint16(26, header.createdAt.month, false);
+  new DataView(data.buffer).setUint16(28, header.createdAt.day, false);
+  new DataView(data.buffer).setUint16(30, header.createdAt.hours, false);
+  new DataView(data.buffer).setUint16(32, header.createdAt.minutes, false);
+  new DataView(data.buffer).setUint16(34, header.createdAt.seconds, false);
+  data.set(new TextEncoder().encode(header.magic), 36);
+  data.set(new TextEncoder().encode(header.platform), 40);
+  new DataView(data.buffer).setUint32(44, header.flags, false);
+  data.set(new TextEncoder().encode(header.manufacturer), 48);
+  data.set(new TextEncoder().encode(header.model), 52);
+  new DataView(data.buffer).setBigUint64(56, header.attributes, false);
+  new DataView(data.buffer).setUint32(64, header.renderingIntent, false);
+  new DataView(data.buffer).setInt32(68, Math.round(header.illuminant.X * 65536), false);
+  new DataView(data.buffer).setInt32(72, Math.round(header.illuminant.Y * 65536), false);
+  new DataView(data.buffer).setInt32(76, Math.round(header.illuminant.Z * 65536), false);
+  data.set(new TextEncoder().encode(header.creator), 80);
+  writeProfileId(data, 84, header.profileId);
+  new DataView(data.buffer).setUint32(128, header.tagCount, false);
+  return data;
 }
 
 export function validateIccHeader(header: CmsIccHeader, actualSize: number): readonly string[] {
