@@ -38,6 +38,7 @@ export interface CmsMultiProcessElementTagValue {
   readonly kind: "mAB" | "mBA";
   readonly inputChannels: number;
   readonly outputChannels: number;
+  readonly rawPayload: Uint8Array;
   readonly offsets: {
     readonly bCurves: number;
     readonly matrix: number;
@@ -187,6 +188,7 @@ function parseMultiProcessElements(
     kind,
     inputChannels,
     outputChannels,
+    rawPayload: new Uint8Array(payload),
     offsets,
     hasBcurves: offsets.bCurves !== 0,
     hasMatrix: offsets.matrix !== 0,
@@ -251,12 +253,15 @@ export function validateLutTagStructure(
   return issues;
 }
 
-export function serializeIccLutTag(value: CmsLut16TagValue | CmsLut8TagValue): Uint8Array {
+export function serializeIccLutTag(value: CmsParsedLutTagValue): Uint8Array {
   switch (value.kind) {
     case "mft1":
       return serializeLut8(value);
     case "mft2":
       return serializeLut16(value);
+    case "mAB":
+    case "mBA":
+      return new Uint8Array(value.rawPayload);
   }
 }
 

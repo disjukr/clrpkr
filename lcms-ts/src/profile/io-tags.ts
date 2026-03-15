@@ -5,7 +5,12 @@ import {
   writeU16,
   writeU32,
 } from "./io-base.js";
-import { serializeIccLutTag, type CmsLut16TagValue, type CmsLut8TagValue } from "./lut.js";
+import {
+  serializeIccLutTag,
+  type CmsLut16TagValue,
+  type CmsLut8TagValue,
+  type CmsMultiProcessElementTagValue,
+} from "./lut.js";
 import type {
   CmsCurveTagValue,
   CmsDescTagValue,
@@ -171,6 +176,7 @@ export function serializeIccTagValue(
     | CmsDescTagValue
     | CmsLut16TagValue
     | CmsLut8TagValue
+    | CmsMultiProcessElementTagValue
     | CmsMlucTagValue
     | CmsParametricCurveTagValue
     | CmsTextTagValue
@@ -183,6 +189,8 @@ export function serializeIccTagValue(
       return serializeTextTag(value);
     case "mft1":
     case "mft2":
+    case "mAB":
+    case "mBA":
       return serializeIccLutTag(value);
     case "mluc":
       return serializeMlucTag(value);
