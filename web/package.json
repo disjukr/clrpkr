@@ -4,18 +4,23 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "predev": "pnpm --filter lcms-ts build",
+    "prebuild": "pnpm --filter lcms-ts build",
+    "dev": "vinext dev",
+    "build": "tsc --noEmit -p tsconfig.app.json && vinext build",
+    "preview": "vinext start"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.6",
     "@react-three/fiber": "^9.5.0",
+    "lcms-ts": "workspace:*",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "three": "^0.183.2"
+    "three": "^0.183.2",
+    "vinext": "^0.0.30"
   },
   "devDependencies": {
+    "@types/node": "^24.5.2",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^6.0.1",
