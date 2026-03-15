@@ -1,4 +1,4 @@
-import { CMS_D50_XYZ, cmsXYZ2Lab } from "lcms-ts";
+import { CMS_D50_XYZ, cmsLab2XYZ } from "lcms-ts";
 import {
   INTENT_PERCEPTUAL,
   cmsGetPCS,
@@ -9,46 +9,47 @@ import {
 
 import type {
   IccOccupancyBuildConfig,
-  LabVolumeBounds,
-  LabVolumeDimensions,
-  LabLattice,
-  LabVolumeSpacing,
+  XyyVolumeBounds,
+  XyyVolumeDimensions,
+  XyyLattice,
+  XyyVolumeSpacing,
   OccupancyGrid,
   ScalarVolume,
 } from "./types.js";
 
 type Vec3 = readonly [number, number, number];
 
-const DEFAULT_DIMENSIONS: Readonly<LabVolumeDimensions> = {
-  width: 256,
-  height: 256,
-  depth: 256,
+const DEFAULT_DIMENSIONS: Readonly<XyyVolumeDimensions> = {
+  width: 128,
+  height: 128,
+  depth: 128,
 };
 
-const DEFAULT_BOUNDS: Readonly<LabVolumeBounds> = {
-  lMin: 0,
-  lMax: 100,
-  aMin: -128,
-  aMax: 127,
-  bMin: -128,
-  bMax: 127,
+const DEFAULT_BOUNDS: Readonly<XyyVolumeBounds> = {
+  xMin: 0,
+  xMax: 0.8,
+  yMin: 0,
+  yMax: 0.9,
+  YMin: 0,
+  YMax: 1,
 };
 
 const DEFAULT_SAMPLE_RESOLUTION = 96;
+const XYY_SINGULARITY_EPSILON = 1e-5;
 
 function computeSpacing(
-  dimensions: LabVolumeDimensions,
-  bounds: LabVolumeBounds,
-): LabVolumeSpacing {
+  dimensions: XyyVolumeDimensions,
+  bounds: XyyVolumeBounds,
+): XyyVolumeSpacing {
   return {
-    lStep: (bounds.lMax - bounds.lMin) / Math.max(1, dimensions.width - 1),
-    aStep: (bounds.aMax - bounds.aMin) / Math.max(1, dimensions.height - 1),
-    bStep: (bounds.bMax - bounds.bMin) / Math.max(1, dimensions.depth - 1),
+    xStep: (bounds.xMax - bounds.xMin) / Math.max(1, dimensions.width - 1),
+    yStep: (bounds.yMax - bounds.yMin) / Math.max(1, dimensions.height - 1),
+    YStep: (bounds.YMax - bounds.YMin) / Math.max(1, dimensions.depth - 1),
   };
 }
 
 function voxelIndex(
-  dimensions: LabVolumeDimensions,
+  dimensions: XyyVolumeDimensions,
   x: number,
   y: number,
   z: number,
@@ -92,7 +93,7 @@ function sampleCoordinate(index: number, resolution: number): number {
   return index / (resolution - 1);
 }
 
-function evaluatePipelineToLab(
+function evaluatePipelineToXyy(
   pcs: string,
   sample: readonly [number, number, number],
   evaluate: (input: readonly number[]) => number[],
@@ -102,24 +103,38 @@ function evaluatePipelineToLab(
     return null;
   }
 
-  if (pcs === "Lab ") {
-    return [
-      (output[0] ?? 0) * 100,
-      (output[1] ?? 0) * 255 - 128,
-      (output[2] ?? 0) * 255 - 128,
-    ];
-  }
+  let xyz:
+    | {
+        X: number;
+        Y: number;
+        Z: number;
+      }
+    | undefined;
 
-  if (pcs === "XYZ ") {
-    const lab = cmsXYZ2Lab(CMS_D50_XYZ, {
+  if (pcs === "Lab ") {
+    xyz = cmsLab2XYZ(CMS_D50_XYZ, {
+      L: (output[0] ?? 0) * 100,
+      a: (output[1] ?? 0) * 255 - 128,
+      b: (output[2] ?? 0) * 255 - 128,
+    });
+  } else if (pcs === "XYZ ") {
+    xyz = {
       X: output[0] ?? 0,
       Y: output[1] ?? 0,
       Z: output[2] ?? 0,
-    });
-    return [lab.L, lab.a, lab.b];
+    };
   }
 
-  return null;
+  if (xyz == null) {
+    return null;
+  }
+
+  const sum = xyz.X + xyz.Y + xyz.Z;
+  if (sum <= XYY_SINGULARITY_EPSILON || xyz.Y <= XYY_SINGULARITY_EPSILON) {
+    return null;
+  }
+
+  return [xyz.X / sum, xyz.Y / sum, xyz.Y];
 }
 
 function latticeIndex(resolution: number, r: number, g: number, b: number): number {
@@ -193,7 +208,7 @@ function pointInTetrahedron(
 
 function markTetrahedronOccupancy(
   occupancy: Uint8Array,
-  dimensions: LabVolumeDimensions,
+  dimensions: XyyVolumeDimensions,
   tetra: readonly [Vec3, Vec3, Vec3, Vec3],
 ): void {
   const xs = tetra.map((vertex) => vertex[0]);
@@ -217,13 +232,13 @@ function markTetrahedronOccupancy(
   }
 }
 
-function buildLabLattice(
+function buildXyyLattice(
   resolution: number,
   pcs: string,
   mapInput: (u: number, v: number, w: number) => readonly number[],
   evaluate: (input: readonly number[]) => number[],
-  bounds: LabVolumeBounds,
-  dimensions: LabVolumeDimensions,
+  bounds: XyyVolumeBounds,
+  dimensions: XyyVolumeDimensions,
 ): { positions: Float32Array; valid: Uint8Array } {
   const positions = new Float32Array(resolution * resolution * resolution * 3);
   const valid = new Uint8Array(resolution * resolution * resolution);
@@ -234,17 +249,17 @@ function buildLabLattice(
       const gf = sampleCoordinate(g, resolution);
       for (let b = 0; b < resolution; b += 1) {
         const bf = sampleCoordinate(b, resolution);
-        const lab = evaluatePipelineToLab(pcs, [rf, gf, bf], (sample) =>
+        const xyy = evaluatePipelineToXyy(pcs, [rf, gf, bf], (sample) =>
           evaluate(mapInput(sample[0] ?? 0, sample[1] ?? 0, sample[2] ?? 0)),
         );
 
-        if (lab == null) {
+        if (xyy == null) {
           continue;
         }
 
-        const x = toGridCoordinate(lab[0], bounds.lMin, bounds.lMax, dimensions.width);
-        const y = toGridCoordinate(lab[1], bounds.aMin, bounds.aMax, dimensions.height);
-        const z = toGridCoordinate(lab[2], bounds.bMin, bounds.bMax, dimensions.depth);
+        const x = toGridCoordinate(xyy[0], bounds.xMin, bounds.xMax, dimensions.width);
+        const y = toGridCoordinate(xyy[1], bounds.yMin, bounds.yMax, dimensions.height);
+        const z = toGridCoordinate(xyy[2], bounds.YMin, bounds.YMax, dimensions.depth);
 
         if (x == null || y == null || z == null) {
           continue;
@@ -260,7 +275,7 @@ function buildLabLattice(
   return { positions, valid };
 }
 
-function createLabLatticeMetadata(
+function createXyyLatticeMetadata(
   config: IccOccupancyBuildConfig,
 ): OccupancyGrid["metadata"] {
   const dimensions = config.dimensions ?? DEFAULT_DIMENSIONS;
@@ -303,9 +318,9 @@ function buildFaceInputMapper(
   };
 }
 
-function voxelizeLabLatticeCells(
+function voxelizeXyyLatticeCells(
   occupancy: Uint8Array,
-  dimensions: LabVolumeDimensions,
+  dimensions: XyyVolumeDimensions,
   lattice: { positions: Float32Array; valid: Uint8Array },
   resolution: number,
 ): void {
@@ -350,11 +365,11 @@ function voxelizeLabLatticeCells(
   }
 }
 
-export function buildLabOccupancyGridFromIcc(
+export function buildXyyOccupancyGridFromIcc(
   iccBytes: Uint8Array,
   config: IccOccupancyBuildConfig = {},
 ): OccupancyGrid {
-  const lattices = buildLabLatticesFromIcc(iccBytes, config);
+  const lattices = buildXyyLatticesFromIcc(iccBytes, config);
   const metadata = lattices[0]?.metadata;
   if (metadata == null) {
     throw new Error("No lattice data was produced for the ICC profile");
@@ -366,7 +381,7 @@ export function buildLabOccupancyGridFromIcc(
   );
 
   for (const lattice of lattices) {
-    voxelizeLabLatticeCells(
+    voxelizeXyyLatticeCells(
       occupancy,
       lattice.metadata.dimensions,
       {
@@ -383,22 +398,22 @@ export function buildLabOccupancyGridFromIcc(
   };
 }
 
-export function buildLabLatticeFromIcc(
+export function buildXyyLatticeFromIcc(
   iccBytes: Uint8Array,
   config: IccOccupancyBuildConfig = {},
-): LabLattice {
-  const lattices = buildLabLatticesFromIcc(iccBytes, config);
+): XyyLattice {
+  const lattices = buildXyyLatticesFromIcc(iccBytes, config);
   if (lattices.length !== 1) {
-    throw new Error("buildLabLatticeFromIcc only returns a single lattice for 3-channel profiles");
+    throw new Error("buildXyyLatticeFromIcc only returns a single lattice for 3-channel profiles");
   }
   return lattices[0]!;
 }
 
-export function buildLabLatticesFromIcc(
+export function buildXyyLatticesFromIcc(
   iccBytes: Uint8Array,
   config: IccOccupancyBuildConfig = {},
-): LabLattice[] {
-  const metadata = createLabLatticeMetadata(config);
+): XyyLattice[] {
+  const metadata = createXyyLatticeMetadata(config);
   const dimensions = config.dimensions ?? DEFAULT_DIMENSIONS;
   const bounds = config.bounds ?? DEFAULT_BOUNDS;
   const profile = cmsOpenProfileFromMem(iccBytes);
@@ -410,13 +425,13 @@ export function buildLabLatticesFromIcc(
 
   const pcs = cmsGetPCS(profile);
   if (pcs !== "Lab " && pcs !== "XYZ ") {
-    throw new Error(`Only Lab and XYZ PCS profiles are supported right now, got ${pcs}`);
+      throw new Error(`Only Lab and XYZ PCS profiles are supported right now, got ${pcs}`);
   }
 
   const evaluate = (input: readonly number[]) => cmsPipelineEvalFloat(input, pipeline);
 
   if (pipeline.inputChannels === 3) {
-    const lattice = buildLabLattice(
+    const lattice = buildXyyLattice(
       metadata.sampleResolution,
       pcs,
       (u, v, w) => [u, v, w],
@@ -435,11 +450,11 @@ export function buildLabLatticesFromIcc(
   }
 
   if (pipeline.inputChannels === 4) {
-    const lattices: LabLattice[] = [];
+    const lattices: XyyLattice[] = [];
 
     for (let fixedChannel = 0; fixedChannel < 4; fixedChannel += 1) {
       for (const fixedValue of [0, 1] as const) {
-        const lattice = buildLabLattice(
+        const lattice = buildXyyLattice(
           metadata.sampleResolution,
           pcs,
           buildFaceInputMapper(fixedChannel, fixedValue),
@@ -476,14 +491,14 @@ export function occupancyGridToScalarVolume(
     metadata: {
       dimensions: occupancy.metadata.dimensions,
       spacing: {
-        xStep: occupancy.metadata.spacing.lStep,
-        yStep: occupancy.metadata.spacing.aStep,
-        zStep: occupancy.metadata.spacing.bStep,
+        xStep: occupancy.metadata.spacing.xStep,
+        yStep: occupancy.metadata.spacing.yStep,
+        zStep: occupancy.metadata.spacing.YStep,
       },
       origin: {
-        x: occupancy.metadata.bounds.lMin,
-        y: occupancy.metadata.bounds.aMin,
-        z: occupancy.metadata.bounds.bMin,
+        x: occupancy.metadata.bounds.xMin,
+        y: occupancy.metadata.bounds.yMin,
+        z: occupancy.metadata.bounds.YMin,
       },
     },
     data: output,

@@ -1,28 +1,28 @@
-export interface LabVolumeBounds {
-  lMin: number;
-  lMax: number;
-  aMin: number;
-  aMax: number;
-  bMin: number;
-  bMax: number;
+export interface XyyVolumeBounds {
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+  YMin: number;
+  YMax: number;
 }
 
-export interface LabVolumeDimensions {
+export interface XyyVolumeDimensions {
   width: number;
   height: number;
   depth: number;
 }
 
-export interface LabVolumeSpacing {
-  lStep: number;
-  aStep: number;
-  bStep: number;
+export interface XyyVolumeSpacing {
+  xStep: number;
+  yStep: number;
+  YStep: number;
 }
 
 export interface OccupancyGridMetadata {
-  dimensions: LabVolumeDimensions;
-  bounds: LabVolumeBounds;
-  spacing: LabVolumeSpacing;
+  dimensions: XyyVolumeDimensions;
+  bounds: XyyVolumeBounds;
+  spacing: XyyVolumeSpacing;
   sampleResolution: number;
   intent: number;
 }
@@ -32,7 +32,7 @@ export interface OccupancyGrid {
   data: Uint8Array;
 }
 
-export interface LabLattice {
+export interface XyyLattice {
   metadata: OccupancyGridMetadata;
   positions: Float32Array;
   valid: Uint8Array;
@@ -74,13 +74,13 @@ export interface SdfGaussianBlurConfig {
 }
 
 export interface IccSdfBuildConfig {
-  dimensions: LabVolumeDimensions;
-  bounds: LabVolumeBounds;
+  dimensions: XyyVolumeDimensions;
+  bounds: XyyVolumeBounds;
   blur?: SdfGaussianBlurConfig;
 }
 
 export interface OccupancyToSdfConfig {
-  distanceUnit?: "voxels" | "lab";
+  distanceUnit?: "voxels" | "xyY";
   insideNegative?: boolean;
 }
 
@@ -89,15 +89,15 @@ export interface GpuBuildOptions {
 }
 
 export interface IccOccupancyBuildConfig {
-  dimensions?: LabVolumeDimensions;
-  bounds?: LabVolumeBounds;
+  dimensions?: XyyVolumeDimensions;
+  bounds?: XyyVolumeBounds;
   sampleResolution?: number;
   intent?: number;
 }
 
 export interface SdfVolumeMetadata extends Omit<ScalarVolumeMetadata, "origin" | "spacing"> {
-  bounds: LabVolumeBounds;
-  spacing: LabVolumeSpacing;
+  bounds: XyyVolumeBounds;
+  spacing: XyyVolumeSpacing;
 }
 
 export interface SdfVolume<TData extends ArrayBufferView = ArrayBufferView> {

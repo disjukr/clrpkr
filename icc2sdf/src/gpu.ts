@@ -5,7 +5,7 @@ import type {
   OccupancyToSdfConfig,
   SdfVolume,
 } from "./types.js";
-import { buildLabLatticesFromIcc } from "./occupancy.js";
+import { buildXyyLatticesFromIcc } from "./occupancy.js";
 
 const MAX_GPU_LINE_LENGTH = 256;
 
@@ -410,7 +410,7 @@ async function readBuffer(
 }
 
 function packLatticeForGpu(
-  lattice: ReturnType<typeof buildLabLatticesFromIcc>[number],
+  lattice: ReturnType<typeof buildXyyLatticesFromIcc>[number],
 ): Float32Array {
   const packed = new Float32Array((lattice.positions.length / 3) * 4);
   const count = lattice.positions.length / 3;
@@ -465,8 +465,8 @@ function createCombineSdfPipeline(device: GPUDevice): GPUComputePipeline {
   });
 }
 
-export async function voxelizeLabLatticeOnGpu(
-  lattice: ReturnType<typeof buildLabLatticesFromIcc>[number],
+export async function voxelizeXyyLatticeOnGpu(
+  lattice: ReturnType<typeof buildXyyLatticesFromIcc>[number],
   options: GpuBuildOptions,
 ): Promise<OccupancyGrid> {
   const { device } = options;
@@ -686,9 +686,9 @@ export async function occupancyGridToSdfVolumeOnGpu(
     device.queue.submit([encoder.finish()]);
   }
 
-  const xStep = options.distanceUnit === "voxels" ? 1 : occupancy.metadata.spacing.lStep;
-  const yStep = options.distanceUnit === "voxels" ? 1 : occupancy.metadata.spacing.aStep;
-  const zStep = options.distanceUnit === "voxels" ? 1 : occupancy.metadata.spacing.bStep;
+  const xStep = options.distanceUnit === "voxels" ? 1 : occupancy.metadata.spacing.xStep;
+  const yStep = options.distanceUnit === "voxels" ? 1 : occupancy.metadata.spacing.yStep;
+  const zStep = options.distanceUnit === "voxels" ? 1 : occupancy.metadata.spacing.YStep;
 
   await runDistanceAxisPass(device, filledA, filledB, occupancy.metadata.dimensions, 0, xStep);
   await runDistanceAxisPass(device, filledB, filledA, occupancy.metadata.dimensions, 1, yStep);
@@ -755,11 +755,11 @@ export async function occupancyGridToSdfVolumeOnGpu(
   };
 }
 
-export async function buildLabOccupancyGridFromIccGpu(
+export async function buildXyyOccupancyGridFromIccGpu(
   iccBytes: Uint8Array,
   config: IccOccupancyBuildConfig & GpuBuildOptions,
 ): Promise<OccupancyGrid> {
-  const lattices = buildLabLatticesFromIcc(iccBytes, config);
+  const lattices = buildXyyLatticesFromIcc(iccBytes, config);
   const metadata = lattices[0]?.metadata;
   if (metadata == null) {
     throw new Error("No lattice data was produced for the ICC profile");
@@ -770,7 +770,7 @@ export async function buildLabOccupancyGridFromIccGpu(
   );
 
   for (const lattice of lattices) {
-    const partial = await voxelizeLabLatticeOnGpu(lattice, config);
+    const partial = await voxelizeXyyLatticeOnGpu(lattice, config);
     for (let index = 0; index < occupancy.length; index += 1) {
       if (partial.data[index] === 1) {
         occupancy[index] = 1;
@@ -784,10 +784,10 @@ export async function buildLabOccupancyGridFromIccGpu(
   };
 }
 
-export async function buildLabSdfVolumeFromIccGpu(
+export async function buildXyySdfVolumeFromIccGpu(
   iccBytes: Uint8Array,
   config: IccOccupancyBuildConfig & OccupancyToSdfConfig & GpuBuildOptions,
 ): Promise<SdfVolume<Float32Array>> {
-  const occupancy = await buildLabOccupancyGridFromIccGpu(iccBytes, config);
+  const occupancy = await buildXyyOccupancyGridFromIccGpu(iccBytes, config);
   return occupancyGridToSdfVolumeOnGpu(occupancy, config);
 }

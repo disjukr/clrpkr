@@ -27,6 +27,7 @@ import {
 } from "three";
 import { parseNrrd } from "../../../icc2sdf/dist/src/nrrd.js";
 import type { NrrdVolume } from "../../../icc2sdf/dist/src/types.js";
+import { CIE_1931_SPECTRAL_LOCUS } from "../lib/cie1931SpectralLocus.js";
 
 type NrrdPreset = {
   readonly path: string;
@@ -54,10 +55,13 @@ type SurfacePointCloud = {
 
 type SliceAxis = "x" | "y" | "z";
 type RenderMode = "slices" | "raymarch";
+type ProjectionMode = "perspective" | "orthographic";
+type SpectralLocusPoint = readonly [number, number];
 
 type R3fDeps = {
   readonly Canvas: typeof import("@react-three/fiber").Canvas;
   readonly Billboard: typeof import("@react-three/drei").Billboard;
+  readonly Line: typeof import("@react-three/drei").Line;
   readonly OrbitControls: typeof import("@react-three/drei").OrbitControls;
   readonly Text: typeof import("@react-three/drei").Text;
   readonly useThree: typeof import("@react-three/fiber").useThree;
@@ -81,6 +85,8 @@ type OrientationDragState = {
 };
 
 const SURFACE_POINT_LIMIT = 48_000;
+const XYY_LUMINANCE_DISPLAY_SCALE = 0.6;
+const XYY_DISPLAY_SCALE = 10;
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -122,8 +128,20 @@ function volumeIndex(
   return x + width * (y + height * z);
 }
 
-function mapLabToDisplay(l: number, a: number, b: number): [number, number, number] {
-  return [a, l, b];
+function mapXyyToDisplay(x: number, yChromaticity: number, luminance: number): [number, number, number] {
+  return [
+    x * XYY_DISPLAY_SCALE,
+    yChromaticity * XYY_DISPLAY_SCALE,
+    luminance * XYY_LUMINANCE_DISPLAY_SCALE * XYY_DISPLAY_SCALE,
+  ];
+}
+
+function getDisplaySteps(spacing: NrrdVolume<Float32Array>["metadata"]["spacing"]) {
+  return {
+    x: Math.abs(spacing.xStep) * XYY_DISPLAY_SCALE,
+    y: Math.abs(spacing.yStep) * XYY_DISPLAY_SCALE,
+    Y: Math.abs(spacing.zStep) * XYY_LUMINANCE_DISPLAY_SCALE * XYY_DISPLAY_SCALE,
+  };
 }
 
 function scalarToRgba(value: number, windowAbs: number): [number, number, number, number] {
@@ -147,6 +165,54 @@ function scalarToRgba(value: number, windowAbs: number): [number, number, number
   ];
 }
 
+function buildLinePositions(points: ReadonlyArray<readonly [number, number, number]>): Float32Array {
+  const values = new Float32Array(points.length * 3);
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index] ?? [0, 0, 0];
+    const offset = index * 3;
+    values[offset] = point[0];
+    values[offset + 1] = point[1];
+    values[offset + 2] = point[2];
+  }
+  return values;
+}
+
+function buildLinePointList(points: Float32Array): Array<[number, number, number]> {
+  return Array.from({ length: points.length / 3 }, (_, index) => [
+    points[index * 3] ?? 0,
+    points[index * 3 + 1] ?? 0,
+    points[index * 3 + 2] ?? 0,
+  ]);
+}
+
+function linearToSrgbChannel(channel: number): number {
+  if (channel <= 0.0031308) {
+    return 12.92 * channel;
+  }
+  return 1.055 * Math.pow(channel, 1 / 2.4) - 0.055;
+}
+
+function chromaticityToApproxSrgb(x: number, y: number): readonly [number, number, number] {
+  if (y <= 1e-6) {
+    return [0, 0, 0];
+  }
+
+  const Y = 1;
+  const X = (x * Y) / y;
+  const Z = ((1 - x - y) * Y) / y;
+
+  const linearR = 3.1338561 * X - 1.6168667 * Y - 0.4906146 * Z;
+  const linearG = -0.9787684 * X + 1.9161415 * Y + 0.033454 * Z;
+  const linearB = 0.0719453 * X - 0.2289914 * Y + 1.4052427 * Z;
+
+  const r = Math.max(0, linearToSrgbChannel(Math.max(0, linearR)));
+  const g = Math.max(0, linearToSrgbChannel(Math.max(0, linearG)));
+  const b = Math.max(0, linearToSrgbChannel(Math.max(0, linearB)));
+
+  const peak = Math.max(r, g, b, 1e-6);
+  return [Math.min(1, r / peak), Math.min(1, g / peak), Math.min(1, b / peak)];
+}
+
 function buildSliceTexture(
   volume: NrrdVolume<Float32Array>,
   axis: SliceAxis,
@@ -161,6 +227,7 @@ function buildSliceTexture(
       origin,
     },
   } = volume;
+  const displaySteps = getDisplaySteps(spacing);
 
   let textureWidth = 1;
   let textureHeight = 1;
@@ -172,35 +239,36 @@ function buildSliceTexture(
   if (axis === "z") {
     textureWidth = width;
     textureHeight = height;
-    physicalWidth = Math.max(spacing.yStep, Math.abs(spacing.yStep) * (height - 1));
-    physicalHeight = Math.max(spacing.xStep, Math.abs(spacing.xStep) * (width - 1));
-    position = mapLabToDisplay(
+    physicalWidth = Math.max(displaySteps.x, displaySteps.x * (width - 1));
+    physicalHeight = Math.max(displaySteps.y, displaySteps.y * (height - 1));
+    position = mapXyyToDisplay(
       origin.x + (width - 1) * spacing.xStep * 0.5,
       origin.y + (height - 1) * spacing.yStep * 0.5,
       origin.z + sliceIndex * spacing.zStep,
     );
+    rotation = [0, 0, 0];
   } else if (axis === "y") {
     textureWidth = width;
     textureHeight = depth;
-    physicalWidth = Math.max(spacing.zStep, Math.abs(spacing.zStep) * (depth - 1));
-    physicalHeight = Math.max(spacing.xStep, Math.abs(spacing.xStep) * (width - 1));
-    position = mapLabToDisplay(
+    physicalWidth = Math.max(displaySteps.x, displaySteps.x * (width - 1));
+    physicalHeight = Math.max(displaySteps.Y, displaySteps.Y * (depth - 1));
+    position = mapXyyToDisplay(
       origin.x + (width - 1) * spacing.xStep * 0.5,
       origin.y + sliceIndex * spacing.yStep,
       origin.z + (depth - 1) * spacing.zStep * 0.5,
     );
-    rotation = [0, Math.PI / 2, 0];
+    rotation = [-Math.PI / 2, 0, 0];
   } else {
     textureWidth = height;
     textureHeight = depth;
-    physicalWidth = Math.max(spacing.yStep, Math.abs(spacing.yStep) * (height - 1));
-    physicalHeight = Math.max(spacing.zStep, Math.abs(spacing.zStep) * (depth - 1));
-    position = mapLabToDisplay(
+    physicalWidth = Math.max(displaySteps.y, displaySteps.y * (height - 1));
+    physicalHeight = Math.max(displaySteps.Y, displaySteps.Y * (depth - 1));
+    position = mapXyyToDisplay(
       origin.x + sliceIndex * spacing.xStep,
       origin.y + (height - 1) * spacing.yStep * 0.5,
       origin.z + (depth - 1) * spacing.zStep * 0.5,
     );
-    rotation = [-Math.PI / 2, 0, 0];
+    rotation = [0, Math.PI / 2, 0];
   }
 
   const rgba = new Uint8Array(textureWidth * textureHeight * 4);
@@ -212,7 +280,8 @@ function buildSliceTexture(
       const z = axis === "z" ? sliceIndex : row;
       const value = data[volumeIndex(width, height, x, y, z)] ?? 0;
       const [r, g, b, a] = scalarToRgba(value, windowAbs);
-      const offset = (column + textureWidth * (textureHeight - 1 - row)) * 4;
+      const targetRow = axis === "y" ? textureHeight - 1 - row : row;
+      const offset = (column + textureWidth * targetRow) * 4;
       rgba[offset] = r;
       rgba[offset + 1] = g;
       rgba[offset + 2] = b;
@@ -264,7 +333,7 @@ function buildSurfacePointCloud(
           continue;
         }
         points.push(
-          ...mapLabToDisplay(
+          ...mapXyyToDisplay(
             origin.x + x * spacing.xStep,
             origin.y + y * spacing.yStep,
             origin.z + z * spacing.zStep,
@@ -316,10 +385,11 @@ function VolumeBounds(props: { readonly volume: NrrdVolume<Float32Array> }) {
       origin,
     },
   } = props.volume;
-  const sizeX = Math.abs(spacing.xStep) * Math.max(1, width - 1);
-  const sizeY = Math.abs(spacing.yStep) * Math.max(1, height - 1);
-  const sizeZ = Math.abs(spacing.zStep) * Math.max(1, depth - 1);
-  const center = mapLabToDisplay(
+  const displaySteps = getDisplaySteps(spacing);
+  const sizeX = displaySteps.x * Math.max(1, width - 1);
+  const sizeY = displaySteps.y * Math.max(1, height - 1);
+  const sizeZ = displaySteps.Y * Math.max(1, depth - 1);
+  const center = mapXyyToDisplay(
     origin.x + (width - 1) * spacing.xStep * 0.5,
     origin.y + (height - 1) * spacing.yStep * 0.5,
     origin.z + (depth - 1) * spacing.zStep * 0.5,
@@ -327,13 +397,19 @@ function VolumeBounds(props: { readonly volume: NrrdVolume<Float32Array> }) {
 
   return (
     <mesh position={center}>
-      <boxGeometry args={[sizeY, sizeX, sizeZ]} />
+      <boxGeometry args={[sizeX, sizeY, sizeZ]} />
       <meshBasicMaterial color="#1c1917" wireframe transparent opacity={0.16} />
     </mesh>
   );
 }
 
-function SurfacePoints(props: { readonly cloud: SurfacePointCloud }) {
+function SurfacePoints(props: {
+  readonly cloud: SurfacePointCloud;
+  readonly volume: NrrdVolume<Float32Array>;
+}) {
+  const { maxSize } = getVolumeFrame(props.volume);
+  const pointSize = Math.max(maxSize * 0.0015, 0.02);
+
   return (
     <points>
       <bufferGeometry>
@@ -350,7 +426,7 @@ function SurfacePoints(props: { readonly cloud: SurfacePointCloud }) {
           itemSize={3}
         />
       </bufferGeometry>
-      <pointsMaterial size={2.8} sizeAttenuation vertexColors transparent opacity={0.78} />
+      <pointsMaterial size={pointSize} sizeAttenuation vertexColors transparent opacity={0.72} />
     </points>
   );
 }
@@ -389,11 +465,11 @@ function createVolumeRaymarchMaterial(
       spacing,
     },
   } = volume;
-  const boxScale = [
-    Math.abs(spacing.yStep) * Math.max(1, height - 1),
-    Math.abs(spacing.xStep) * Math.max(1, width - 1),
-    Math.abs(spacing.zStep) * Math.max(1, depth - 1),
-  ] as const;
+  const displaySteps = getDisplaySteps(spacing);
+  const sizeX = displaySteps.x * Math.max(1, width - 1);
+  const sizeY = displaySteps.y * Math.max(1, height - 1);
+  const sizeZ = displaySteps.Y * Math.max(1, depth - 1);
+  const boxScale = [sizeX, sizeY, sizeZ] as const;
 
   return new ShaderMaterial({
     glslVersion: GLSL3,
@@ -405,24 +481,24 @@ function createVolumeRaymarchMaterial(
       volumeTex: { value: texture },
       inverseModelMatrix: { value: new Matrix4() },
       boxScale: { value: boxScale },
-      labMin: {
+      displayMin: {
         value: [
-          volume.metadata.origin.y,
-          volume.metadata.origin.x,
-          volume.metadata.origin.z,
+          volume.metadata.origin.x * XYY_DISPLAY_SCALE,
+          volume.metadata.origin.y * XYY_DISPLAY_SCALE,
+          volume.metadata.origin.z * XYY_LUMINANCE_DISPLAY_SCALE * XYY_DISPLAY_SCALE,
         ],
       },
-      labSpan: {
+      displaySpan: {
         value: [
-          Math.abs(volume.metadata.spacing.yStep) * Math.max(1, height - 1),
-          Math.abs(volume.metadata.spacing.xStep) * Math.max(1, width - 1),
-          Math.abs(volume.metadata.spacing.zStep) * Math.max(1, depth - 1),
+          displaySteps.x * Math.max(1, width - 1),
+          displaySteps.y * Math.max(1, height - 1),
+          displaySteps.Y * Math.max(1, depth - 1),
         ],
       },
       texelSize: { value: [1 / Math.max(width, 1), 1 / Math.max(height, 1), 1 / Math.max(depth, 1)] },
       maxAbs: { value: Math.max(maxAbs, 0.0001) },
       isoThreshold: { value: Math.max(isoThreshold, 0.0001) },
-      stepCount: { value: 96 },
+      stepCount: { value: 320 },
     },
     vertexShader: `
       out vec3 vLocalPosition;
@@ -439,8 +515,8 @@ function createVolumeRaymarchMaterial(
       uniform sampler3D volumeTex;
       uniform mat4 inverseModelMatrix;
       uniform vec3 boxScale;
-      uniform vec3 labMin;
-      uniform vec3 labSpan;
+      uniform vec3 displayMin;
+      uniform vec3 displaySpan;
       uniform vec3 texelSize;
       uniform float maxAbs;
       uniform float isoThreshold;
@@ -466,26 +542,23 @@ function createVolumeRaymarchMaterial(
         return texture(volumeTex, localPoint + 0.5).r;
       }
 
-      vec3 localPointToLab(vec3 localPoint) {
-        return labMin + (localPoint + 0.5) * labSpan;
+      vec3 localPointToXyy(vec3 localPoint) {
+        vec3 displayPoint = displayMin + (localPoint + 0.5) * displaySpan;
+        return vec3(
+          displayPoint.x / ${XYY_DISPLAY_SCALE.toFixed(8)},
+          displayPoint.y / ${XYY_DISPLAY_SCALE.toFixed(8)},
+          displayPoint.z / ${(XYY_LUMINANCE_DISPLAY_SCALE * XYY_DISPLAY_SCALE).toFixed(8)}
+        );
       }
 
-      vec3 labToXyzD50(vec3 lab) {
-        float fy = (lab.x + 16.0) / 116.0;
-        float fx = fy + lab.y / 500.0;
-        float fz = fy - lab.z / 200.0;
-
-        float epsilon = 216.0 / 24389.0;
-        float kappa = 24389.0 / 27.0;
-
-        float xr = pow(fx, 3.0) > epsilon ? pow(fx, 3.0) : (116.0 * fx - 16.0) / kappa;
-        float yr = lab.x > (kappa * epsilon) ? pow((lab.x + 16.0) / 116.0, 3.0) : lab.x / kappa;
-        float zr = pow(fz, 3.0) > epsilon ? pow(fz, 3.0) : (116.0 * fz - 16.0) / kappa;
-
+      vec3 xyyToXyzD50(vec3 xyy) {
+        if (xyy.y <= 1e-6) {
+          return vec3(0.0, xyy.z, 0.0);
+        }
         return vec3(
-          xr * 0.9642,
-          yr * 1.0,
-          zr * 0.8251
+          (xyy.x * xyy.z) / xyy.y,
+          xyy.z,
+          ((1.0 - xyy.x - xyy.y) * xyy.z) / xyy.y
         );
       }
 
@@ -518,11 +591,23 @@ function createVolumeRaymarchMaterial(
         return normalize(vec3(dx, dy, dz) + 1e-6);
       }
 
+      vec3 localNormalToWorld(vec3 localNormal) {
+        // The raymarched box is translated and non-uniformly scaled but not rotated.
+        // Undo the box scale so lighting is computed in display/world space.
+        return normalize(localNormal / max(boxScale, vec3(1e-6)));
+      }
+
+      vec4 shadeSurface(vec3 rayOrigin, vec3 samplePoint) {
+        vec3 xyy = localPointToXyy(samplePoint);
+        vec3 base = xyzD50ToSrgb(xyyToXyzD50(xyy));
+        return vec4(base, 1.0);
+      }
+
       float refineSurfaceHit(vec3 rayOrigin, vec3 rayDir, float nearT, float farT) {
         float a = nearT;
         float b = farT;
         float fa = sampleSdf(rayOrigin + rayDir * a);
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 8; i++) {
           float mid = 0.5 * (a + b);
           float fm = sampleSdf(rayOrigin + rayDir * mid);
           if (sign(fa) == sign(fm)) {
@@ -533,6 +618,21 @@ function createVolumeRaymarchMaterial(
           }
         }
         return 0.5 * (a + b);
+      }
+
+      float findClosestSurfaceT(vec3 rayOrigin, vec3 rayDir, float nearT, float farT) {
+        float bestT = nearT;
+        float bestAbs = 1e9;
+        for (int i = 0; i < 10; i++) {
+          float u = float(i) / 9.0;
+          float t = mix(nearT, farT, u);
+          float candidate = abs(sampleSdf(rayOrigin + rayDir * t));
+          if (candidate < bestAbs) {
+            bestAbs = candidate;
+            bestT = t;
+          }
+        }
+        return bestT;
       }
 
       void main() {
@@ -546,12 +646,17 @@ function createVolumeRaymarchMaterial(
 
         float t = max(hit.x, 0.0);
         float tEnd = hit.y;
-        float hitThreshold = max(isoThreshold * 0.22, 0.0025);
-        float previousT = t;
+        float hitThreshold = max(isoThreshold * 0.24, 0.002);
+        float baseStep = max((tEnd - t) / max(stepCount, 1.0), 0.0008);
         float previousSdf = sampleSdf(rayOrigin + rayDir * t);
-        float rayMetric = max(length(rayDir * boxScale), 1e-4);
+        float previousAbsSdf = abs(previousSdf);
 
-        for (float i = 0.0; i < 256.0; i += 1.0) {
+        if (previousAbsSdf <= hitThreshold) {
+          outColor = shadeSurface(rayOrigin, rayOrigin + rayDir * t);
+          return;
+        }
+
+        for (float i = 0.0; i < 384.0; i += 1.0) {
           if (i >= stepCount || t > tEnd) {
             break;
           }
@@ -559,30 +664,29 @@ function createVolumeRaymarchMaterial(
           vec3 samplePoint = rayOrigin + rayDir * t;
           float sdf = sampleSdf(samplePoint);
           float absSdf = abs(sdf);
+          bool crossedIso = sdf * previousSdf < 0.0;
 
-          if (absSdf <= hitThreshold || sdf * previousSdf < 0.0) {
-            float refinedT = absSdf <= hitThreshold ? t : refineSurfaceHit(rayOrigin, rayDir, previousT, t);
-            samplePoint = rayOrigin + rayDir * refinedT;
-            sdf = sampleSdf(samplePoint);
-            vec3 normal = sampleGradient(samplePoint);
-            vec3 lab = localPointToLab(samplePoint);
-            vec3 base = xyzD50ToSrgb(labToXyzD50(lab));
-            vec3 lightDir = normalize(vec3(0.45, 0.72, 0.55));
-            vec3 viewDir = normalize(rayOrigin - samplePoint);
-            float diffuse = max(dot(normal, lightDir), 0.0);
-            float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.2);
-            float rim = pow(1.0 - max(dot(normal, viewDir), 0.0), 4.0);
-            vec3 coolLift = vec3(0.16, 0.74, 0.98) * fresnel * 0.12;
-            vec3 color = base * (0.45 + diffuse * 0.75) + vec3(1.0, 1.0, 1.0) * rim * 0.06 + coolLift;
-            outColor = vec4(color, 1.0);
+          if (absSdf <= hitThreshold || crossedIso || previousAbsSdf <= hitThreshold) {
+            if (crossedIso) {
+              float refinedT = refineSurfaceHit(rayOrigin, rayDir, max(t - baseStep, hit.x), t);
+              outColor = shadeSurface(rayOrigin, rayOrigin + rayDir * refinedT);
+              return;
+            }
+            float closestT = findClosestSurfaceT(
+              rayOrigin,
+              rayDir,
+              max(t - baseStep, hit.x),
+              min(t + baseStep, tEnd)
+            );
+            outColor = shadeSurface(rayOrigin, rayOrigin + rayDir * closestT);
             return;
           }
 
-          previousT = t;
           previousSdf = sdf;
-          t += clamp(absSdf / rayMetric, 0.0015, 0.04);
+          previousAbsSdf = absSdf;
+          t += baseStep;
         }
-
+        
         discard;
       }
     `,
@@ -626,17 +730,18 @@ function VolumeRaymarch(props: {
     },
   } = props.volume;
 
-  const sizeX = Math.abs(spacing.xStep) * Math.max(1, width - 1);
-  const sizeY = Math.abs(spacing.yStep) * Math.max(1, height - 1);
-  const sizeZ = Math.abs(spacing.zStep) * Math.max(1, depth - 1);
-  const center = mapLabToDisplay(
+  const displaySteps = getDisplaySteps(spacing);
+  const sizeX = displaySteps.x * Math.max(1, width - 1);
+  const sizeY = displaySteps.y * Math.max(1, height - 1);
+  const sizeZ = displaySteps.Y * Math.max(1, depth - 1);
+  const center = mapXyyToDisplay(
     origin.x + (width - 1) * spacing.xStep * 0.5,
     origin.y + (height - 1) * spacing.yStep * 0.5,
     origin.z + (depth - 1) * spacing.zStep * 0.5,
   );
 
   return (
-    <mesh ref={meshRef} position={center} scale={[sizeY, sizeX, sizeZ]} renderOrder={5}>
+    <mesh ref={meshRef} position={center} scale={[sizeX, sizeY, sizeZ]} renderOrder={5}>
       <boxGeometry args={[1, 1, 1]} />
       <primitive attach="material" object={material} />
     </mesh>
@@ -652,10 +757,11 @@ function getVolumeFrame(volume: NrrdVolume<Float32Array>) {
     },
   } = volume;
 
-  const sizeX = Math.abs(spacing.xStep) * Math.max(1, width - 1);
-  const sizeY = Math.abs(spacing.yStep) * Math.max(1, height - 1);
-  const sizeZ = Math.abs(spacing.zStep) * Math.max(1, depth - 1);
-  const center = mapLabToDisplay(
+  const displaySteps = getDisplaySteps(spacing);
+  const sizeX = displaySteps.x * Math.max(1, width - 1);
+  const sizeY = displaySteps.y * Math.max(1, height - 1);
+  const sizeZ = displaySteps.Y * Math.max(1, depth - 1);
+  const center = mapXyyToDisplay(
     origin.x + (width - 1) * spacing.xStep * 0.5,
     origin.y + (height - 1) * spacing.yStep * 0.5,
     origin.z + (depth - 1) * spacing.zStep * 0.5,
@@ -663,7 +769,19 @@ function getVolumeFrame(volume: NrrdVolume<Float32Array>) {
 
   return {
     center,
-    maxSize: Math.max(sizeY, sizeX, sizeZ),
+    diagonal: Math.hypot(sizeX, sizeY, sizeZ),
+    maxSize: Math.max(sizeX, sizeY, sizeZ),
+  };
+}
+
+function getCameraFrustum(volume: NrrdVolume<Float32Array>): {
+  readonly near: number;
+  readonly far: number;
+} {
+  const { maxSize } = getVolumeFrame(volume);
+  return {
+    near: Math.max(maxSize * 0.004, 0.01),
+    far: Math.max(maxSize * 18, 12),
   };
 }
 
@@ -672,21 +790,21 @@ function getCameraPositionForView(
   view: CameraView,
 ): [number, number, number] {
   const { center, maxSize } = getVolumeFrame(volume);
-  const distance = Math.max(80, maxSize * 1.4);
+  const distance = Math.max(maxSize * 1.8, 2.1);
 
   switch (view) {
     case "front":
-      return [center[0], center[1], center[2] + distance];
+      return [center[0], center[1] + distance, center[2]];
     case "back":
-      return [center[0], center[1], center[2] - distance];
+      return [center[0], center[1] - distance, center[2]];
     case "left":
       return [center[0] - distance, center[1], center[2]];
     case "right":
       return [center[0] + distance, center[1], center[2]];
     case "top":
-      return [center[0], center[1] + distance, center[2]];
+      return [center[0], center[1], center[2] + distance];
     case "bottom":
-      return [center[0], center[1] - distance, center[2]];
+      return [center[0], center[1], center[2] - distance];
     case "iso":
     default:
       return [
@@ -702,7 +820,7 @@ function getCameraPositionForOrientation(
   orientation: OrientationAngles,
 ): [number, number, number] {
   const { center, maxSize } = getVolumeFrame(volume);
-  const distance = Math.max(80, maxSize * 1.4);
+  const distance = Math.max(maxSize * 1.8, 2.1);
   const pitch = (orientation.pitch * Math.PI) / 180;
   const yaw = (orientation.yaw * Math.PI) / 180;
 
@@ -730,6 +848,8 @@ function CameraViewController(props: {
   readonly volume: NrrdVolume<Float32Array>;
   readonly viewState: CameraViewState;
   readonly dragState: OrientationDragState | null;
+  readonly projectionMode: ProjectionMode;
+  readonly povDegrees: number;
   readonly controlsRef: React.MutableRefObject<{
     readonly target: { set(x: number, y: number, z: number): void };
     update(): void;
@@ -737,18 +857,36 @@ function CameraViewController(props: {
   readonly onOrientationChange: (angles: OrientationAngles) => void;
   readonly deps: R3fDeps;
 }) {
-  const { camera } = props.deps.useThree();
+  const { camera, size } = props.deps.useThree();
 
   useEffect(() => {
-    const { center } = getVolumeFrame(props.volume);
+    const frame = getVolumeFrame(props.volume);
+    const { center } = frame;
+    const frustum = getCameraFrustum(props.volume);
     const position =
       props.dragState == null
         ? getCameraPositionForView(props.volume, props.viewState.name)
         : getCameraPositionForOrientation(props.volume, props.dragState.angles);
 
     camera.position.set(position[0], position[1], position[2]);
+    camera.near = frustum.near;
+    camera.far = frustum.far;
     camera.up.set(0, 1, 0);
+    if ("isPerspectiveCamera" in camera && camera.isPerspectiveCamera) {
+      camera.fov = props.povDegrees;
+    }
+    if ("isOrthographicCamera" in camera && camera.isOrthographicCamera) {
+      const aspect = Math.max(size.width / Math.max(size.height, 1), 1e-4);
+      const fitHeight = frame.maxSize * 1.25;
+      const fitWidth = fitHeight * aspect;
+      camera.left = -fitWidth * 0.5;
+      camera.right = fitWidth * 0.5;
+      camera.top = fitHeight * 0.5;
+      camera.bottom = -fitHeight * 0.5;
+      camera.zoom = 1;
+    }
     camera.lookAt(center[0], center[1], center[2]);
+    camera.updateProjectionMatrix();
 
     props.controlsRef.current?.target.set(center[0], center[1], center[2]);
     props.controlsRef.current?.update();
@@ -758,6 +896,10 @@ function CameraViewController(props: {
     props.controlsRef,
     props.dragState,
     props.onOrientationChange,
+    props.povDegrees,
+    props.projectionMode,
+    size.height,
+    size.width,
     props.viewState.name,
     props.viewState.token,
     props.volume,
@@ -871,14 +1013,14 @@ function OrientationWidgetScene(props: {
           {
             view: "front",
             label: "Front",
-            position: [0, 0, 1.02],
-            rotation: [0, 0, 0],
+            position: [0, 1.02, 0],
+            rotation: [-Math.PI / 2, 0, 0],
           },
           {
             view: "back",
             label: "Back",
-            position: [0, 0, -1.02],
-            rotation: [0, Math.PI, 0],
+            position: [0, -1.02, 0],
+            rotation: [Math.PI / 2, 0, 0],
           },
           {
             view: "right",
@@ -895,14 +1037,14 @@ function OrientationWidgetScene(props: {
           {
             view: "top",
             label: "Top",
-            position: [0, 1.02, 0],
-            rotation: [-Math.PI / 2, 0, 0],
+            position: [0, 0, 1.02],
+            rotation: [0, 0, 0],
           },
           {
             view: "bottom",
             label: "Bottom",
-            position: [0, -1.02, 0],
-            rotation: [Math.PI / 2, 0, 0],
+            position: [0, 0, -1.02],
+            rotation: [0, Math.PI, 0],
           },
         ] as const).map((face) => (
           <group key={face.view} position={face.position} rotation={face.rotation}>
@@ -937,7 +1079,7 @@ function OrientationWidgetScene(props: {
   );
 }
 
-function LabAxes(props: {
+function XyyAxes(props: {
   readonly volume: NrrdVolume<Float32Array>;
   readonly deps: R3fDeps;
 }) {
@@ -950,13 +1092,34 @@ function LabAxes(props: {
     },
   } = props.volume;
 
-  const corner = mapLabToDisplay(origin.x - 12, origin.y - 12, origin.z - 12);
-  const xEnd = mapLabToDisplay(origin.x - 12, origin.y + (height - 1) * spacing.yStep + 18, origin.z - 12);
-  const xLabel: [number, number, number] = [xEnd[0] + 10, xEnd[1], xEnd[2]];
-  const yEnd = mapLabToDisplay(origin.x + (width - 1) * spacing.xStep + 18, origin.y - 12, origin.z - 12);
-  const yLabel: [number, number, number] = [yEnd[0], yEnd[1] + 10, yEnd[2]];
-  const zEnd = mapLabToDisplay(origin.x - 12, origin.y - 12, origin.z + (depth - 1) * spacing.zStep + 18);
-  const zLabel: [number, number, number] = [zEnd[0], zEnd[1], zEnd[2] + 10];
+  const displaySteps = getDisplaySteps(spacing);
+  const sizeX = displaySteps.x * Math.max(1, width - 1);
+  const sizeY = displaySteps.y * Math.max(1, height - 1);
+  const sizeZ = displaySteps.Y * Math.max(1, depth - 1);
+  const maxSize = Math.max(sizeX, sizeY, sizeZ, 0.001);
+  const labelPadding = maxSize * 0.04;
+  const labelFontSize = maxSize * 0.08;
+  const sphereRadius = maxSize * 0.012;
+
+  const corner = mapXyyToDisplay(origin.x, origin.y, origin.z);
+  const xEnd = mapXyyToDisplay(
+    origin.x + (width - 1) * spacing.xStep,
+    origin.y,
+    origin.z,
+  );
+  const xLabel: [number, number, number] = [xEnd[0] + labelPadding, xEnd[1], xEnd[2]];
+  const yEnd = mapXyyToDisplay(
+    origin.x,
+    origin.y + (height - 1) * spacing.yStep,
+    origin.z,
+  );
+  const yLabel: [number, number, number] = [yEnd[0], yEnd[1] + labelPadding, yEnd[2]];
+  const zEnd = mapXyyToDisplay(
+    origin.x,
+    origin.y,
+    origin.z + (depth - 1) * spacing.zStep,
+  );
+  const zLabel: [number, number, number] = [zEnd[0], zEnd[1], zEnd[2] + labelPadding];
 
   return (
     <group>
@@ -995,66 +1158,151 @@ function LabAxes(props: {
       </line>
 
       <mesh position={xEnd}>
-        <sphereGeometry args={[2.3, 12, 12]} />
+        <sphereGeometry args={[sphereRadius, 12, 12]} />
         <meshBasicMaterial color="#1c1917" />
       </mesh>
       <mesh position={yEnd}>
-        <sphereGeometry args={[2.3, 12, 12]} />
+        <sphereGeometry args={[sphereRadius, 12, 12]} />
         <meshBasicMaterial color="#1c1917" />
       </mesh>
       <mesh position={zEnd}>
-        <sphereGeometry args={[2.3, 12, 12]} />
+        <sphereGeometry args={[sphereRadius, 12, 12]} />
         <meshBasicMaterial color="#1c1917" />
       </mesh>
 
       <Billboard position={xLabel} follow lockX={false} lockY={false} lockZ={false}>
         <Text
           color="#111827"
-          fontSize={9}
+          fontSize={labelFontSize}
           anchorX="center"
           anchorY="middle"
-          outlineWidth={0.75}
+          outlineWidth={labelFontSize * 0.08}
           outlineColor="#ffffff"
         >
-          a
+          x
         </Text>
       </Billboard>
       <Billboard position={yLabel} follow lockX={false} lockY={false} lockZ={false}>
         <Text
           color="#111827"
-          fontSize={9}
+          fontSize={labelFontSize}
           anchorX="center"
           anchorY="middle"
-          outlineWidth={0.75}
+          outlineWidth={labelFontSize * 0.08}
           outlineColor="#ffffff"
         >
-          L
+          y
         </Text>
       </Billboard>
       <Billboard position={zLabel} follow lockX={false} lockY={false} lockZ={false}>
         <Text
           color="#111827"
-          fontSize={9}
+          fontSize={labelFontSize}
           anchorX="center"
           anchorY="middle"
-          outlineWidth={0.75}
+          outlineWidth={labelFontSize * 0.08}
           outlineColor="#ffffff"
         >
-          b
+          Y
         </Text>
       </Billboard>
     </group>
   );
 }
 
+function CieHorseshoe(props: {
+  readonly volume: NrrdVolume<Float32Array>;
+  readonly luminance: number;
+  readonly spectralLocus: ReadonlyArray<SpectralLocusPoint>;
+  readonly deps: R3fDeps;
+}) {
+  const { Line } = props.deps;
+  const {
+    metadata: {
+      dimensions: { depth },
+      spacing,
+    },
+  } = props.volume;
+
+  const spectralPositions = useMemo(() => {
+    const spectralPoints = props.spectralLocus.map(([x, y]) =>
+      mapXyyToDisplay(x, y, props.luminance),
+    );
+    return buildLinePositions(spectralPoints);
+  }, [props.luminance, props.spectralLocus]);
+  const spectralPointList = useMemo(() => buildLinePointList(spectralPositions), [spectralPositions]);
+  const spectralColors = useMemo<[number, number, number][]>(
+    () =>
+      props.spectralLocus.map(([x, y]) => {
+        const color = chromaticityToApproxSrgb(x, y);
+        return [color[0], color[1], color[2]];
+      }),
+    [props.spectralLocus],
+  );
+
+  const purpleLinePositions = useMemo(() => {
+    const first = props.spectralLocus[0] ?? [0.1741, 0.005];
+    const last =
+      props.spectralLocus[props.spectralLocus.length - 1] ?? [0.7347, 0.2653];
+    return buildLinePositions([
+      mapXyyToDisplay(first[0], first[1], props.luminance),
+      mapXyyToDisplay(last[0], last[1], props.luminance),
+    ]);
+  }, [props.luminance, props.spectralLocus]);
+  const purpleLinePointList = useMemo(
+    () => buildLinePointList(purpleLinePositions),
+    [purpleLinePositions],
+  );
+  const purpleLineColors = useMemo<[number, number, number][]>(
+    () => {
+      const first = props.spectralLocus[0] ?? [0.1741, 0.005];
+      const last =
+        props.spectralLocus[props.spectralLocus.length - 1] ?? [0.7347, 0.2653];
+      const start = chromaticityToApproxSrgb(first[0], first[1]);
+      const end = chromaticityToApproxSrgb(last[0], last[1]);
+      return [
+        [start[0], start[1], start[2]],
+        [end[0], end[1], end[2]],
+      ];
+    },
+    [props.spectralLocus],
+  );
+
+  const offset =
+    Math.abs(spacing.zStep) * Math.max(1, depth - 1) * XYY_LUMINANCE_DISPLAY_SCALE * XYY_DISPLAY_SCALE * 0.002;
+
+  return (
+    <group position={[0, 0, -offset]}>
+      <Line
+        points={spectralPointList}
+        vertexColors={spectralColors}
+        lineWidth={4.2}
+        transparent
+        opacity={0.95}
+      />
+      <Line
+        points={purpleLinePointList}
+        vertexColors={purpleLineColors}
+        lineWidth={3.2}
+        transparent
+        opacity={0.84}
+      />
+    </group>
+  );
+}
+
 function VolumeScene(props: {
   readonly volume: NrrdVolume<Float32Array>;
+  readonly spectralLocus: ReadonlyArray<SpectralLocusPoint>;
   readonly xSlice: number;
   readonly ySlice: number;
   readonly zSlice: number;
+  readonly horseshoeLuminance: number;
   readonly windowAbs: number;
   readonly isoThreshold: number;
   readonly renderMode: RenderMode;
+  readonly projectionMode: ProjectionMode;
+  readonly povDegrees: number;
   readonly maxAbs: number;
   readonly viewState: CameraViewState;
   readonly dragState: OrientationDragState | null;
@@ -1066,17 +1314,28 @@ function VolumeScene(props: {
     readonly target: { set(x: number, y: number, z: number): void };
     update(): void;
   } | null>(null);
+  const frame = useMemo(() => getVolumeFrame(props.volume), [props.volume]);
   const cloud = useMemo(
     () => buildSurfacePointCloud(props.volume, props.isoThreshold),
     [props.isoThreshold, props.volume],
   );
 
   return (
-    <Canvas camera={{ position: [180, -280, 210], fov: 36 }}>
+    <Canvas
+      key={props.projectionMode}
+      orthographic={props.projectionMode === "orthographic"}
+      camera={
+        props.projectionMode === "orthographic"
+          ? { position: [180, -280, 210], zoom: 1 }
+          : { position: [180, -280, 210], fov: props.povDegrees }
+      }
+    >
       <CameraViewController
         volume={props.volume}
         viewState={props.viewState}
         dragState={props.dragState}
+        projectionMode={props.projectionMode}
+        povDegrees={props.povDegrees}
         controlsRef={controlsRef}
         onOrientationChange={props.onOrientationChange}
         deps={props.deps}
@@ -1084,7 +1343,13 @@ function VolumeScene(props: {
       <color attach="background" args={["#f4eee4"]} />
       <group>
         <VolumeBounds volume={props.volume} />
-        <LabAxes volume={props.volume} deps={props.deps} />
+        <CieHorseshoe
+          volume={props.volume}
+          luminance={props.horseshoeLuminance}
+          spectralLocus={props.spectralLocus}
+          deps={props.deps}
+        />
+        <XyyAxes volume={props.volume} deps={props.deps} />
         {props.renderMode === "raymarch" ? (
           <VolumeRaymarch
             volume={props.volume}
@@ -1096,7 +1361,7 @@ function VolumeScene(props: {
             <AxisSlice volume={props.volume} axis="x" sliceIndex={props.xSlice} windowAbs={props.windowAbs} />
             <AxisSlice volume={props.volume} axis="y" sliceIndex={props.ySlice} windowAbs={props.windowAbs} />
             <AxisSlice volume={props.volume} axis="z" sliceIndex={props.zSlice} windowAbs={props.windowAbs} />
-            <SurfacePoints cloud={cloud} />
+            <SurfacePoints cloud={cloud} volume={props.volume} />
           </>
         )}
       </group>
@@ -1104,6 +1369,8 @@ function VolumeScene(props: {
         enableDamping
         makeDefault
         key={props.viewState.token}
+        minDistance={Math.max(frame.diagonal * 0.8, frame.maxSize * 1.2, 2.4)}
+        maxDistance={Math.max(frame.diagonal * 6, frame.maxSize * 10, 24)}
         onChange={(event) => {
           const cameraObject = event?.target?.object;
           const targetObject = event?.target?.target;
@@ -1158,28 +1425,67 @@ export default function NrrdRoute() {
   const [windowScale, setWindowScale] = useState(0.2);
   const [surfaceScale, setSurfaceScale] = useState(0.03);
   const [renderMode, setRenderMode] = useState<RenderMode>("slices");
+  const [projectionMode, setProjectionMode] = useState<ProjectionMode>("perspective");
+  const [povDegrees, setPovDegrees] = useState(36);
+  const [horseshoeLuminance, setHorseshoeLuminance] = useState(0);
+  const [spectralLocus, setSpectralLocus] = useState<ReadonlyArray<SpectralLocusPoint>>(
+    CIE_1931_SPECTRAL_LOCUS,
+  );
   const [xSlice, setXSlice] = useState(0);
   const [ySlice, setYSlice] = useState(0);
   const [zSlice, setZSlice] = useState(0);
-  const [viewState, setViewState] = useState<CameraViewState>({ name: "iso", token: 0 });
+  const [viewState, setViewState] = useState<CameraViewState>({ name: "top", token: 0 });
   const [dragState, setDragState] = useState<OrientationDragState | null>(null);
-  const [orientation, setOrientation] = useState<OrientationAngles>({ pitch: -28, yaw: 34 });
+  const [orientation, setOrientation] = useState<OrientationAngles>({ pitch: -90, yaw: 0 });
   const [r3fDeps, setR3fDeps] = useState<R3fDeps | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadR3fDeps() {
-      const [{ Canvas, useThree }, { Billboard, OrbitControls, Text }] = await Promise.all([
+      const [{ Canvas, useThree }, { Billboard, Line, OrbitControls, Text }] = await Promise.all([
         import("@react-three/fiber"),
         import("@react-three/drei"),
       ]);
       if (!cancelled) {
-        setR3fDeps({ Billboard, Canvas, OrbitControls, Text, useThree });
+        setR3fDeps({ Billboard, Canvas, Line, OrbitControls, Text, useThree });
       }
     }
 
     void loadR3fDeps();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSpectralLocus() {
+      try {
+        const response = await fetch("/api/cie-1931-2deg");
+        if (!response.ok) {
+          throw new Error(`Failed to load CIE spectral locus: ${response.status}`);
+        }
+        const csv = await response.text();
+        const points = csv
+          .trim()
+          .split(/\r?\n/)
+          .slice(1)
+          .map((line) => line.split(","))
+          .map(([x, y]) => [Number(x), Number(y)] as const)
+          .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
+        if (!cancelled && points.length > 1) {
+          setSpectralLocus(points);
+        }
+      } catch {
+        if (!cancelled) {
+          setSpectralLocus(CIE_1931_SPECTRAL_LOCUS);
+        }
+      }
+    }
+
+    void loadSpectralLocus();
     return () => {
       cancelled = true;
     };
@@ -1227,6 +1533,7 @@ export default function NrrdRoute() {
       setXSlice(Math.floor(volume.volume.metadata.dimensions.width / 2));
       setYSlice(Math.floor(volume.volume.metadata.dimensions.height / 2));
       setZSlice(Math.floor(volume.volume.metadata.dimensions.depth / 2));
+      setHorseshoeLuminance(volume.volume.metadata.origin.z);
     });
   }, [volume]);
 
@@ -1324,7 +1631,7 @@ export default function NrrdRoute() {
                 <span className="block text-[#fdba74]">3D NRRD volume</span>
               </h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-stone-300">
-                Open the generated SDF volumes from `icc2sdf`, scrub three orthogonal slices, and orbit the volume in 3D with react-three-fiber.
+                Open the generated SDF volumes from `icc2sdf`, inspect them in xyY space, scrub three orthogonal slices, and orbit the volume in 3D with react-three-fiber.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <Link className="inline-flex rounded-full border border-white/14 px-4 py-2 text-sm text-stone-100 no-underline transition hover:bg-white/8" href="/">
@@ -1463,12 +1770,16 @@ export default function NrrdRoute() {
                         </div>
                         <VolumeScene
                           volume={volume.volume}
+                          spectralLocus={spectralLocus}
                           xSlice={xSlice}
                           ySlice={ySlice}
                           zSlice={zSlice}
+                          horseshoeLuminance={horseshoeLuminance}
                           windowAbs={windowAbs}
                           isoThreshold={isoThreshold}
                           renderMode={renderMode}
+                          projectionMode={projectionMode}
+                          povDegrees={povDegrees}
                           maxAbs={stats.maxAbs}
                           viewState={viewState}
                           dragState={dragState}
@@ -1496,11 +1807,11 @@ export default function NrrdRoute() {
                       <MetaCard label="Dimensions" value={`${dims?.width} × ${dims?.height} × ${dims?.depth}`} />
                       <MetaCard
                         label="Spacing"
-                        value={`${volume.volume.metadata.spacing.xStep.toFixed(2)} / ${volume.volume.metadata.spacing.yStep.toFixed(2)} / ${volume.volume.metadata.spacing.zStep.toFixed(2)}`}
+                        value={`x ${volume.volume.metadata.spacing.xStep.toFixed(3)} / y ${volume.volume.metadata.spacing.yStep.toFixed(3)} / Y ${volume.volume.metadata.spacing.zStep.toFixed(3)}`}
                       />
                       <MetaCard
                         label="Origin"
-                        value={`${volume.volume.metadata.origin.x.toFixed(1)}, ${volume.volume.metadata.origin.y.toFixed(1)}, ${volume.volume.metadata.origin.z.toFixed(1)}`}
+                        value={`x ${volume.volume.metadata.origin.x.toFixed(3)}, y ${volume.volume.metadata.origin.y.toFixed(3)}, Y ${volume.volume.metadata.origin.z.toFixed(3)}`}
                       />
                       <MetaCard label="Range" value={`${stats.min.toFixed(3)} .. ${stats.max.toFixed(3)}`} />
                     </div>
@@ -1515,7 +1826,7 @@ export default function NrrdRoute() {
                     </div>
                     <div className="grid gap-3">
                       <label className="grid gap-1.5 text-sm text-stone-700">
-                        <span>a slice ({xSlice})</span>
+                        <span>x slice ({xSlice})</span>
                         <input
                           type="range"
                           min={0}
@@ -1526,7 +1837,7 @@ export default function NrrdRoute() {
                         />
                       </label>
                       <label className="grid gap-1.5 text-sm text-stone-700">
-                        <span>L slice ({ySlice})</span>
+                        <span>y slice ({ySlice})</span>
                         <input
                           type="range"
                           min={0}
@@ -1537,7 +1848,7 @@ export default function NrrdRoute() {
                         />
                       </label>
                       <label className="grid gap-1.5 text-sm text-stone-700">
-                        <span>b slice ({zSlice})</span>
+                        <span>Y slice ({zSlice})</span>
                         <input
                           type="range"
                           min={0}
@@ -1576,6 +1887,54 @@ export default function NrrdRoute() {
                           step={0.002}
                           value={surfaceScale}
                           onChange={(event) => setSurfaceScale(Number(event.target.value))}
+                        />
+                      </label>
+                    </div>
+                  </section>
+
+                  <section className="rounded-[1.4rem] border border-black/8 bg-[rgba(255,252,246,0.84)] p-4 shadow-[0_16px_36px_rgba(70,48,22,0.08)] backdrop-blur">
+                    <div className="mb-3 flex items-baseline justify-between gap-4">
+                      <h2>View Controls</h2>
+                      <span className="text-[0.82rem] uppercase tracking-[0.12em] text-stone-600">Projection and overlays</span>
+                    </div>
+                    <div className="grid gap-3">
+                      <div className="inline-flex w-fit rounded-full border border-black/10 bg-white/70 p-1 text-[11px] uppercase tracking-[0.12em] text-stone-700">
+                        <button
+                          className={`rounded-full px-3 py-1 transition ${projectionMode === "perspective" ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"}`}
+                          type="button"
+                          onClick={() => setProjectionMode("perspective")}
+                        >
+                          Perspective
+                        </button>
+                        <button
+                          className={`rounded-full px-3 py-1 transition ${projectionMode === "orthographic" ? "bg-stone-900 text-white" : "text-stone-600 hover:bg-stone-100"}`}
+                          type="button"
+                          onClick={() => setProjectionMode("orthographic")}
+                        >
+                          Orthographic
+                        </button>
+                      </div>
+                      <label className="grid gap-1.5 text-sm text-stone-700">
+                        <span>FOV ({povDegrees.toFixed(0)}°)</span>
+                        <input
+                          type="range"
+                          min={18}
+                          max={72}
+                          step={1}
+                          value={povDegrees}
+                          onChange={(event) => setPovDegrees(Number(event.target.value))}
+                          disabled={projectionMode === "orthographic"}
+                        />
+                      </label>
+                      <label className="grid gap-1.5 text-sm text-stone-700">
+                        <span>Horseshoe Y ({horseshoeLuminance.toFixed(3)})</span>
+                        <input
+                          type="range"
+                          min={volume.volume.metadata.origin.z}
+                          max={volume.volume.metadata.origin.z + Math.max(0, (dims?.depth ?? 1) - 1) * volume.volume.metadata.spacing.zStep}
+                          step={Math.max(volume.volume.metadata.spacing.zStep, 0.001)}
+                          value={horseshoeLuminance}
+                          onChange={(event) => setHorseshoeLuminance(Number(event.target.value))}
                         />
                       </label>
                     </div>

@@ -3,7 +3,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  buildLabSdfVolumeFromIccGpu,
+  buildXyySdfVolumeFromIccGpu,
   createNodeGpuRuntime,
   serializeNrrd,
 } from "../dist/src/index.js";
@@ -57,19 +57,19 @@ async function main() {
 
     try {
       const iccBytes = new Uint8Array(await readFile(filePath));
-      const sdf = await buildLabSdfVolumeFromIccGpu(iccBytes, { device });
+      const sdf = await buildXyySdfVolumeFromIccGpu(iccBytes, { device });
       const nrrd = serializeNrrd({
         metadata: {
           dimensions: sdf.metadata.dimensions,
           spacing: {
-            xStep: sdf.metadata.spacing.lStep,
-            yStep: sdf.metadata.spacing.aStep,
-            zStep: sdf.metadata.spacing.bStep,
+            xStep: sdf.metadata.spacing.xStep,
+            yStep: sdf.metadata.spacing.yStep,
+            zStep: sdf.metadata.spacing.YStep,
           },
           origin: {
-            x: sdf.metadata.bounds.lMin,
-            y: sdf.metadata.bounds.aMin,
-            z: sdf.metadata.bounds.bMin,
+            x: sdf.metadata.bounds.xMin,
+            y: sdf.metadata.bounds.yMin,
+            z: sdf.metadata.bounds.YMin,
           },
         },
         data: sdf.data,

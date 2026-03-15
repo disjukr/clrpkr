@@ -176,11 +176,11 @@ export function occupancyGridToSdfVolume(
     bounds,
     spacing,
   } = occupancy.metadata;
-  const distanceUnit = config.distanceUnit ?? "lab";
+  const distanceUnit = config.distanceUnit ?? "xyY";
   const insideNegative = config.insideNegative ?? true;
-  const xStep = distanceUnit === "lab" ? spacing.lStep : 1;
-  const yStep = distanceUnit === "lab" ? spacing.aStep : 1;
-  const zStep = distanceUnit === "lab" ? spacing.bStep : 1;
+  const xStep = distanceUnit === "xyY" ? spacing.xStep : 1;
+  const yStep = distanceUnit === "xyY" ? spacing.yStep : 1;
+  const zStep = distanceUnit === "xyY" ? spacing.YStep : 1;
 
   if (occupancy.data.length !== voxelCount(occupancy)) {
     throw new Error("Occupancy grid data length does not match its dimensions");
