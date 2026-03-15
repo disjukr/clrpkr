@@ -1,4 +1,4 @@
-import { CMS_D50_XYZ } from "../color/conversions.js";
+import { CMS_D50_XYZ, cmsLab2XYZ, cmsXYZ2Lab } from "../color/conversions.js";
 import type { CmsMAT3 } from "../math/matrix.js";
 import { cmsMAT3inverse } from "../math/matrix.js";
 import {
@@ -75,6 +75,12 @@ export type CmsPipelineStage =
       readonly kind: "lab-v4-to-v2";
     }
   | {
+      readonly kind: "xyz-to-lab";
+    }
+  | {
+      readonly kind: "lab-to-xyz";
+    }
+  | {
       readonly kind: "named-color";
       readonly output: "pcs" | "device";
       readonly data: CmsNamedColorTagValue;
@@ -133,7 +139,7 @@ function buildPipelineFromLut16(tag: CmsLut16TagValue): CmsPipeline {
 
   stages.push({ kind: "tone-curves", channels: tag.inputChannels, curves: inputCurves });
 
-  if (!isIdentityMatrix(tag.matrix)) {
+  if (tag.inputChannels === 3 && tag.outputChannels === 3 && !isIdentityMatrix(tag.matrix)) {
     stages.push({
       kind: "matrix",
       rows: 3,
@@ -176,7 +182,7 @@ function buildPipelineFromLut8(tag: CmsLut8TagValue): CmsPipeline {
 
   stages.push({ kind: "tone-curves", channels: tag.inputChannels, curves: inputCurves });
 
-  if (!isIdentityMatrix(tag.matrix)) {
+  if (tag.inputChannels === 3 && tag.outputChannels === 3 && !isIdentityMatrix(tag.matrix)) {
     stages.push({
       kind: "matrix",
       rows: 3,
@@ -214,19 +220,23 @@ function matrixStageFromValues(matrix: readonly number[], offset: readonly numbe
 
 function buildPipelineFromMpe(tag: CmsMultiProcessElementTagValue): CmsPipeline {
   const stages: CmsPipelineStage[] = [];
-  if (tag.bCurves && !curvesAreIdentity(tag.bCurves)) {
-    stages.push({ kind: "tone-curves", channels: tag.bCurves.length, curves: tag.bCurves });
-  }
+  const pushCurves = (curves: readonly CmsToneCurve[] | undefined): void => {
+    if (curves) {
+      stages.push({ kind: "tone-curves", channels: curves.length, curves });
+    }
+  };
 
-  if (tag.matrixValues && tag.matrixOffsetValues) {
-    stages.push(matrixStageFromValues(tag.matrixValues, tag.matrixOffsetValues));
-  }
+  const pushMatrix = (): void => {
+    if (tag.matrixValues && tag.matrixOffsetValues) {
+      stages.push(matrixStageFromValues(tag.matrixValues, tag.matrixOffsetValues));
+    }
+  };
 
-  if (tag.mCurves && !curvesAreIdentity(tag.mCurves)) {
-    stages.push({ kind: "tone-curves", channels: tag.mCurves.length, curves: tag.mCurves });
-  }
+  const pushClut = (): void => {
+    if (!tag.clutGridPoints || !tag.clutValuesParsed) {
+      return;
+    }
 
-  if (tag.clutGridPoints && tag.clutValuesParsed) {
     if (tag.clutValuesParsed instanceof Uint8Array) {
       stages.push({
         kind: "clut8",
@@ -235,19 +245,30 @@ function buildPipelineFromMpe(tag: CmsMultiProcessElementTagValue): CmsPipeline 
         gridPoints: tag.clutGridPoints,
         values: tag.clutValuesParsed,
       });
-    } else {
-      stages.push({
-        kind: "clut16",
-        inputChannels: tag.inputChannels,
-        outputChannels: tag.outputChannels,
-        gridPoints: tag.clutGridPoints,
-        values: tag.clutValuesParsed,
-      });
+      return;
     }
-  }
 
-  if (tag.aCurves && !curvesAreIdentity(tag.aCurves)) {
-    stages.push({ kind: "tone-curves", channels: tag.aCurves.length, curves: tag.aCurves });
+    stages.push({
+      kind: "clut16",
+      inputChannels: tag.inputChannels,
+      outputChannels: tag.outputChannels,
+      gridPoints: tag.clutGridPoints,
+      values: tag.clutValuesParsed,
+    });
+  };
+
+  if (tag.kind === "mAB") {
+    pushCurves(tag.aCurves);
+    pushClut();
+    pushCurves(tag.mCurves);
+    pushMatrix();
+    pushCurves(tag.bCurves);
+  } else {
+    pushCurves(tag.bCurves);
+    pushMatrix();
+    pushCurves(tag.mCurves);
+    pushClut();
+    pushCurves(tag.aCurves);
   }
 
   return {
@@ -263,9 +284,7 @@ function buildPipelineFromGenericMpe(tag: CmsGenericMultiProcessTagValue): CmsPi
   for (const element of tag.elements) {
     switch (element.kind) {
       case "cvst":
-        if (!curvesAreIdentity(element.curves)) {
-          stages.push({ kind: "tone-curves", channels: element.inputChannels, curves: element.curves });
-        }
+        stages.push({ kind: "tone-curves", channels: element.inputChannels, curves: element.curves });
         break;
       case "matf":
         stages.push({
@@ -479,7 +498,10 @@ function evaluateClutStageTetrahedral(
 }
 
 function evaluateNormalizationStage(
-  stage: Extract<CmsPipelineStage, { kind: "normalize-to-lab" | "normalize-from-lab" | "normalize-to-xyz" | "normalize-from-xyz" | "lab-v2-to-v4" | "lab-v4-to-v2" }>,
+  stage: Extract<
+    CmsPipelineStage,
+    { kind: "normalize-to-lab" | "normalize-from-lab" | "normalize-to-xyz" | "normalize-from-xyz" | "lab-v2-to-v4" | "lab-v4-to-v2" | "xyz-to-lab" | "lab-to-xyz" }
+  >,
   input: readonly number[],
 ): number[] {
   switch (stage.kind) {
@@ -499,6 +521,26 @@ function evaluateNormalizationStage(
       return [(input[0] ?? 0), (input[1] ?? 0), (input[2] ?? 0)];
     case "normalize-from-xyz":
       return [(input[0] ?? 0), (input[1] ?? 0), (input[2] ?? 0)];
+    case "xyz-to-lab": {
+      const lab = cmsXYZ2Lab(CMS_D50_XYZ, {
+        X: input[0] ?? 0,
+        Y: input[1] ?? 0,
+        Z: input[2] ?? 0,
+      });
+      return [
+        clampUnit(lab.L / 100),
+        clampUnit((lab.a + 128) / 255),
+        clampUnit((lab.b + 128) / 255),
+      ];
+    }
+    case "lab-to-xyz": {
+      const xyz = cmsLab2XYZ(CMS_D50_XYZ, {
+        L: clampUnit(input[0] ?? 0) * 100,
+        a: clampUnit(input[1] ?? 0) * 255 - 128,
+        b: clampUnit(input[2] ?? 0) * 255 - 128,
+      });
+      return [xyz.X, xyz.Y, xyz.Z];
+    }
     case "lab-v2-to-v4":
       return [
         clampUnit((input[0] ?? 0) * (65535 / 65280)),
@@ -557,6 +599,8 @@ export function cmsPipelineEvalFloat(
       case "normalize-from-lab":
       case "normalize-to-xyz":
       case "normalize-from-xyz":
+      case "xyz-to-lab":
+      case "lab-to-xyz":
       case "lab-v2-to-v4":
       case "lab-v4-to-v2":
         current = evaluateNormalizationStage(stage, current);
@@ -771,10 +815,8 @@ export function cmsReadOutputLUT(profile: CmsProfile, intent: number): CmsPipeli
 }
 
 export function cmsReadDevicelinkLUT(profile: CmsProfile, intent: number): CmsPipeline | null {
-  if (cmsGetDeviceClass(profile) !== "link" || intent > INTENT_ABSOLUTE_COLORIMETRIC) {
-    if (cmsGetDeviceClass(profile) !== "nmcl" || intent > INTENT_ABSOLUTE_COLORIMETRIC) {
-      return null;
-    }
+  if (intent > INTENT_ABSOLUTE_COLORIMETRIC) {
+    return null;
   }
 
   if (cmsGetDeviceClass(profile) === "nmcl") {
@@ -863,6 +905,10 @@ function buildRgbInputMatrixShaper(profile: CmsProfile): CmsPipeline | null {
     },
   ];
 
+  if (cmsGetPCS(profile) === "Lab ") {
+    stages.push({ kind: "xyz-to-lab" });
+  }
+
   return {
     inputChannels: 3,
     outputChannels: 3,
@@ -896,6 +942,7 @@ function buildRgbOutputMatrixShaper(profile: CmsProfile): CmsPipeline | null {
     inputChannels: 3,
     outputChannels: 3,
     stages: [
+      ...(cmsGetPCS(profile) === "Lab " ? ([{ kind: "lab-to-xyz" }] as const) : []),
       {
         kind: "matrix",
         rows: 3,

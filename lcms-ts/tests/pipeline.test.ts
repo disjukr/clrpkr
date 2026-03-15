@@ -72,7 +72,7 @@ describe("pipeline mapping", () => {
 
     expect(pipeline.inputChannels).toBe(3);
     expect(pipeline.outputChannels).toBe(3);
-    expect(pipeline.stages.map((stage) => stage.kind)).toEqual(["matrix", "clut16"]);
+    expect(pipeline.stages.map((stage) => stage.kind)).toEqual(["tone-curves", "clut16", "tone-curves", "matrix", "tone-curves"]);
   });
 
   it("evaluates a matrix/clut RGB pipeline into bounded output", () => {
