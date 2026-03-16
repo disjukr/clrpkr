@@ -1,4 +1,5 @@
 import { CMS_D50_XYZ, cmsLab2XYZ, cmsXYZ2Lab } from "../color/conversions.js";
+import { _cmsComputeInterpParamsEx, CMS_LERP_FLAGS_TRILINEAR, cmsEvalInterpFloat } from "../interp/index.js";
 import type { CmsMAT3 } from "../math/matrix.js";
 import { cmsMAT3inverse } from "../math/matrix.js";
 import {
@@ -353,148 +354,19 @@ function evaluateMatrixStage(stage: Extract<CmsPipelineStage, { kind: "matrix" }
   });
 }
 
-function computeStrides(gridPoints: readonly number[], outputChannels: number): number[] {
-  const strides = new Array(gridPoints.length).fill(0);
-  let stride = outputChannels;
-
-  for (let i = gridPoints.length - 1; i >= 0; i -= 1) {
-    strides[i] = stride;
-    stride *= gridPoints[i]!;
-  }
-
-  return strides;
-}
-
-function sampleClutValue(
-  values: ArrayLike<number>,
-  strides: readonly number[],
-  coords: readonly number[],
-  outputIndex: number,
-): number {
-  let index = outputIndex;
-  for (let i = 0; i < coords.length; i += 1) {
-    index += coords[i]! * strides[i]!;
-  }
-  return values[index] ?? 0;
-}
-
 function evaluateClutStage(
   stage: Extract<CmsPipelineStage, { kind: "clut8" | "clut16" | "clutf" }>,
   input: readonly number[],
   interpolation: NonNullable<CmsPipelineEvalOptions["interpolation"]>,
 ): number[] {
-  if (interpolation !== "multilinear" && stage.inputChannels === 3) {
-    return evaluateClutStageTetrahedral(stage, input);
-  }
-
-  return evaluateClutStageMultilinear(stage, input);
-}
-
-function evaluateClutStageMultilinear(
-  stage: Extract<CmsPipelineStage, { kind: "clut8" | "clut16" | "clutf" }>,
-  input: readonly number[],
-): number[] {
-  const output = new Array(stage.outputChannels).fill(0);
-  const lowerCoords = stage.gridPoints.map((points, index) => {
-    const scaled = clampUnit(input[index] ?? 0) * (points - 1);
-    return Math.min(Math.floor(scaled), points - 1);
-  });
-  const fractions = stage.gridPoints.map((points, index) => {
-    const scaled = clampUnit(input[index] ?? 0) * (points - 1);
-    const lower = Math.min(Math.floor(scaled), points - 1);
-    return lower >= points - 1 ? 0 : scaled - lower;
-  });
-  const strides = computeStrides(stage.gridPoints, stage.outputChannels);
-  const vertices = 1 << stage.inputChannels;
-
-  for (let vertex = 0; vertex < vertices; vertex += 1) {
-    const coords = lowerCoords.slice();
-    let weight = 1;
-
-    for (let axis = 0; axis < stage.inputChannels; axis += 1) {
-      const useUpper = (vertex & (1 << axis)) !== 0;
-      const points = stage.gridPoints[axis]!;
-      const fraction = fractions[axis]!;
-
-      if (useUpper) {
-        coords[axis] = Math.min(coords[axis]! + 1, points - 1);
-        weight *= fraction;
-      } else {
-        weight *= 1 - fraction;
-      }
-    }
-
-    for (let outIndex = 0; outIndex < stage.outputChannels; outIndex += 1) {
-      output[outIndex] += weight * sampleClutValue(stage.values, strides, coords, outIndex);
-    }
-  }
-
-  const scale = stage.kind === "clut8" ? 255 : stage.kind === "clut16" ? 65535 : 1;
-  return output.map((value) => clampUnit(value / scale));
-}
-
-function evaluateClutStageTetrahedral(
-  stage: Extract<CmsPipelineStage, { kind: "clut8" | "clut16" | "clutf" }>,
-  input: readonly number[],
-): number[] {
-  const [gx, gy, gz] = stage.gridPoints;
-  const px = clampUnit(input[0] ?? 0) * (gx! - 1);
-  const py = clampUnit(input[1] ?? 0) * (gy! - 1);
-  const pz = clampUnit(input[2] ?? 0) * (gz! - 1);
-
-  const x0 = Math.floor(px);
-  const y0 = Math.floor(py);
-  const z0 = Math.floor(pz);
-  const rx = px - x0;
-  const ry = py - y0;
-  const rz = pz - z0;
-
-  const x1 = x0 + (clampUnit(input[0] ?? 0) >= 1 ? 0 : 1);
-  const y1 = y0 + (clampUnit(input[1] ?? 0) >= 1 ? 0 : 1);
-  const z1 = z0 + (clampUnit(input[2] ?? 0) >= 1 ? 0 : 1);
-  const strides = computeStrides(stage.gridPoints, stage.outputChannels);
-  const scale = stage.kind === "clut8" ? 255 : stage.kind === "clut16" ? 65535 : 1;
-  const output = new Array(stage.outputChannels).fill(0);
-
-  for (let outIndex = 0; outIndex < stage.outputChannels; outIndex += 1) {
-    const dens = (x: number, y: number, z: number) =>
-      sampleClutValue(stage.values, strides, [x, y, z], outIndex) / scale;
-
-    const c0 = dens(x0, y0, z0);
-    let c1 = 0;
-    let c2 = 0;
-    let c3 = 0;
-
-    if (rx >= ry && ry >= rz) {
-      c1 = dens(x1, y0, z0) - c0;
-      c2 = dens(x1, y1, z0) - dens(x1, y0, z0);
-      c3 = dens(x1, y1, z1) - dens(x1, y1, z0);
-    } else if (rx >= rz && rz >= ry) {
-      c1 = dens(x1, y0, z0) - c0;
-      c2 = dens(x1, y1, z1) - dens(x1, y0, z1);
-      c3 = dens(x1, y0, z1) - dens(x1, y0, z0);
-    } else if (rz >= rx && rx >= ry) {
-      c1 = dens(x1, y0, z1) - dens(x0, y0, z1);
-      c2 = dens(x1, y1, z1) - dens(x1, y0, z1);
-      c3 = dens(x0, y0, z1) - c0;
-    } else if (ry >= rx && rx >= rz) {
-      c1 = dens(x1, y1, z0) - dens(x0, y1, z0);
-      c2 = dens(x0, y1, z0) - c0;
-      c3 = dens(x1, y1, z1) - dens(x1, y1, z0);
-    } else if (ry >= rz && rz >= rx) {
-      c1 = dens(x1, y1, z1) - dens(x0, y1, z1);
-      c2 = dens(x0, y1, z0) - c0;
-      c3 = dens(x0, y1, z1) - dens(x0, y1, z0);
-    } else if (rz >= ry && ry >= rx) {
-      c1 = dens(x1, y1, z1) - dens(x0, y1, z1);
-      c2 = dens(x0, y1, z1) - dens(x0, y0, z1);
-      c3 = dens(x0, y0, z1) - c0;
-    }
-
-    output[outIndex] = clampUnit(c0 + c1 * rx + c2 * ry + c3 * rz);
-  }
-
-  return output;
+  const params = _cmsComputeInterpParamsEx(
+    stage.gridPoints,
+    stage.inputChannels,
+    stage.outputChannels,
+    stage.values,
+    interpolation === "multilinear" ? CMS_LERP_FLAGS_TRILINEAR : 0,
+  );
+  return cmsEvalInterpFloat(input, params, interpolation === "multilinear" ? "trilinear" : "tetrahedral");
 }
 
 function evaluateNormalizationStage(

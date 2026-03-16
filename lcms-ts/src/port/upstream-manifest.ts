@@ -69,8 +69,8 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     upstreamSource: "cmsintrp.c",
     category: "interpolation",
     targetModule: "src/interp/index.ts",
-    status: "planned",
-    notes: "CLUT interpolation kernels; performance-sensitive.",
+    status: "bootstrapped",
+    notes: "Interpolation parameter computation plus float/16-bit 1D, bilinear, multilinear, tetrahedral, and recursive N-D tetrahedral CLUT evaluation are now split into a dedicated module and wired into pipeline CLUT evaluation.",
   },
   {
     upstreamSource: "cmsio0.c",

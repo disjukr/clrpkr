@@ -15,6 +15,7 @@ Port the public Little CMS surface and core implementation to TypeScript while k
 - `src/profile/header.ts`, `src/profile/tag-table.ts`, `src/profile/tags.ts`, `src/profile/io-base.ts`, `src/profile/io-tags.ts`, and `src/profile/profile.ts` now cover ICC header/tag-table parsing, broad `cmstypes` payload parsing and serialization, raw/cooked tag handling, linked tags, in-memory profile open/save, generic stream save, and save-time profile ID recomputation.
 - `src/profile/lut.ts` and `src/pipeline/index.ts` now cover `mft1`, `mft2`, `mAB`, `mBA`, and generic `mpet` parsing, serialization, pipeline construction, and float evaluation.
 - `src/hash/md5.ts` ports the MD5 path used for ICC profile IDs.
+- `src/interp/index.ts` now holds the first dedicated interpolation port from `cmsintrp.c`, covering interpolation-parameter setup plus float and 16-bit 1D, bilinear, multilinear, tetrahedral, and recursive N-D tetrahedral CLUT evaluation.
 - `src/core/context.ts` holds the first context abstraction for later plugin/error-state work.
 
 ## Status summary
@@ -24,7 +25,7 @@ Port the public Little CMS surface and core implementation to TypeScript while k
 - `cmstypes.c`: done for the current scope.
 - `cmslut.c`: done for the current scope.
 - `cmsmd5.c`: partially ported and sufficient for current ICC save/profile-ID behavior.
-- `cmsmtrx.c`, `cmspcs.c`, `cmswtpnt.c`, `cmsgamma.c`: bootstrapped and actively used by the ICC/profile pipeline path.
+- `cmsmtrx.c`, `cmspcs.c`, `cmswtpnt.c`, `cmsgamma.c`, `cmsintrp.c`: bootstrapped and actively used by the ICC/profile pipeline path.
 - Transform-planning and execution modules are still largely unported:
   - `cmscnvrt.c`
   - `cmsopt.c`
@@ -59,6 +60,7 @@ Port the public Little CMS surface and core implementation to TypeScript while k
   - generic `mpet` raw preservation for unknown/vendor elements
   - float evaluation
   - multilinear and tetrahedral interpolation
+  - recursive tetrahedral interpolation for 4+ input dimensions via the dedicated `cmsintrp` port
   - named-color stages
   - Lab/XYZ normalization and compatibility stages
   - upstream-compatible `mAB`/`mBA` stage ordering

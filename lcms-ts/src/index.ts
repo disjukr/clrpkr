@@ -4,6 +4,7 @@ export * from "./types/color.js";
 export * from "./core/context.js";
 export * from "./color/conversions.js";
 export * from "./hash/md5.js";
+export * from "./interp/index.js";
 export * from "./math/matrix.js";
 export * from "./pipeline/index.js";
 export * from "./profile/header.js";
