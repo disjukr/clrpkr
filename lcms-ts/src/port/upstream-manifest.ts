@@ -188,7 +188,7 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     upstreamSource: "cmsxform.c",
     category: "transform",
     targetModule: "src/transform/index.ts",
-    status: "planned",
-    notes: "Main transform execution pipeline.",
+    status: "bootstrapped",
+    notes: "Minimal transform handles plus cmsCreateTransform/cmsCreateTransformTHR/cmsDeleteTransform/cmsDoTransform are in place over the current pipeline evaluator for a two-profile chunky RGB/GRAY/CMYK subset, including bootstrap NULLTRANSFORM and COPY_ALPHA behavior.",
   },
 ] as const;

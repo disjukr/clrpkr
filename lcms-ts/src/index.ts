@@ -17,3 +17,4 @@ export * from "./profile/profile.js";
 export * from "./profile/tag-table.js";
 export * from "./profile/tags.js";
 export * from "./tone-curve/index.js";
+export * from "./transform/index.js";
