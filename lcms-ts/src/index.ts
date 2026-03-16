@@ -7,6 +7,7 @@ export * from "./hash/md5.js";
 export * from "./interp/index.js";
 export * from "./math/matrix.js";
 export * from "./pipeline/index.js";
+export * from "./pipeline/sampling.js";
 export * from "./profile/header.js";
 export * from "./profile/io-base.js";
 export * from "./profile/io-tags.js";

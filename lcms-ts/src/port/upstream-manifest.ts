@@ -153,8 +153,8 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     upstreamSource: "cmssamp.c",
     category: "sampling",
     targetModule: "src/pipeline/sampling.ts",
-    status: "planned",
-    notes: "CLUT traversal and sampling utilities.",
+    status: "bootstrapped",
+    notes: "Initial CLUT traversal/sampling utilities are in place: cmsSliceSpace16/Float plus cmsStageSampleCLut16bit/Float over the current CLUT stage model, including inspect-vs-write-back behavior.",
   },
   {
     upstreamSource: "cmssm.c",

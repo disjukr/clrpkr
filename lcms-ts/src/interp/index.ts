@@ -317,11 +317,11 @@ export function cmsEvalInterpFloat(
 }
 
 export function cmsEvalInterp16(
-  input: readonly number[],
+  input: ArrayLike<number>,
   params: CmsInterpParams,
   method?: CmsInterpMethod,
 ): Uint16Array {
-  const unitInput = input.slice(0, params.nInputs).map((value) => clampUnit(value / 65535));
+  const unitInput = Array.from({ length: params.nInputs }, (_, index) => clampUnit((input[index] ?? 0) / 65535));
   const values = cmsEvalInterpFloat(unitInput, params, method);
   return Uint16Array.from(values, (value) => Math.round(clampUnit(value) * 65535));
 }
