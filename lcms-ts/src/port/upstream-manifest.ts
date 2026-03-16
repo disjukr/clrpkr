@@ -125,8 +125,8 @@ export const UPSTREAM_MODULE_MANIFEST: readonly UpstreamModuleManifestEntry[] = 
     upstreamSource: "cmspack.c",
     category: "packing",
     targetModule: "src/format/packing.ts",
-    status: "planned",
-    notes: "Pixel format unpack/pack functions.",
+    status: "bootstrapped",
+    notes: "Format bitfield helpers, stock formatter constants, cmsFormatterForColorspaceOfProfile/cmsFormatterForPCSOfProfile, and a first chunky RGB/GRAY/CMYK pack-unpack subset are in place and differential-tested against upstream for representative profile formatter selection.",
   },
   {
     upstreamSource: "cmspcs.c",

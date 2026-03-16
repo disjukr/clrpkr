@@ -17,6 +17,7 @@ Port the public Little CMS surface and core implementation to TypeScript while k
 - `src/hash/md5.ts` ports the MD5 path used for ICC profile IDs.
 - `src/interp/index.ts` now holds the first dedicated interpolation port from `cmsintrp.c`, covering interpolation-parameter setup plus float and 16-bit 1D, bilinear, multilinear, tetrahedral, and recursive N-D tetrahedral CLUT evaluation.
 - `src/pipeline/sampling.ts` now holds the first `cmssamp.c` subset for CLUT traversal and resampling helpers.
+- `src/format/packing.ts` now holds the first `cmspack.c` subset for formatter bitfields, stock formatter constants, profile-based formatter selection, and basic chunky RGB/GRAY/CMYK pack/unpack helpers.
 - `src/core/context.ts` holds the first context abstraction for later plugin/error-state work.
 
 ## Status summary
@@ -26,11 +27,10 @@ Port the public Little CMS surface and core implementation to TypeScript while k
 - `cmstypes.c`: done for the current scope.
 - `cmslut.c`: done for the current scope.
 - `cmsmd5.c`: partially ported and sufficient for current ICC save/profile-ID behavior.
-- `cmsmtrx.c`, `cmspcs.c`, `cmswtpnt.c`, `cmsgamma.c`, `cmsintrp.c`, `cmssamp.c`: bootstrapped and actively used by the ICC/profile pipeline path.
+- `cmsmtrx.c`, `cmspcs.c`, `cmswtpnt.c`, `cmsgamma.c`, `cmsintrp.c`, `cmssamp.c`, `cmspack.c`: bootstrapped and actively used by the ICC/profile pipeline path.
 - Transform-planning and execution modules are still largely unported:
   - `cmscnvrt.c`
   - `cmsopt.c`
-  - `cmspack.c`
   - `cmsxform.c`
 
 ## What is done now
@@ -66,6 +66,11 @@ Port the public Little CMS surface and core implementation to TypeScript while k
   - named-color stages
   - Lab/XYZ normalization and compatibility stages
   - upstream-compatible `mAB`/`mBA` stage ordering
+- Formatter and packing support:
+  - format bitfield helpers and stock formatter constants for the current subset
+  - `cmsFormatterForColorspaceOfProfile`
+  - `cmsFormatterForPCSOfProfile`
+  - basic chunky RGB/GRAY/CMYK 8-bit and float pack/unpack helpers
 - `cmsio1`-level selection helpers:
   - intent-based input/output LUT selection
   - devicelink LUT selection
@@ -107,11 +112,10 @@ Port the public Little CMS surface and core implementation to TypeScript while k
 
 - Transform APIs are still missing:
   - profile linking
-  - formatter pack/unpack
   - optimized transform planning
   - execution over packed pixel buffers
   - proofing and BPC behavior at transform level
-- Interpolation is still embedded in the current pipeline module rather than split into upstream-like dedicated modules.
+- Formatter coverage is still a bootstrap subset and does not yet include the full upstream stock formatter table or formatter plugin chain.
 - Plugin registry and extensibility are still missing:
   - `cmsplugin`
   - richer runtime plugin registration
