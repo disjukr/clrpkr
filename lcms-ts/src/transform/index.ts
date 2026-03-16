@@ -3,6 +3,7 @@ import { CMS_D50_XYZ, cmsLab2XYZ, cmsXYZ2Lab } from "../color/conversions.js";
 import {
   _cmsFormatterIsFloat,
   cmsChannelsOfColorSpace,
+  cmsFormatterPixelSize,
   packChunky16To8,
   packChunkyFloat32,
   T_CHANNELS,
@@ -82,30 +83,40 @@ function bridgePCS(values: ArrayLike<number>, inputPCS: string, outputPCS: strin
   throw new Error(`Unsupported PCS bridge ${JSON.stringify(inputPCS)} -> ${JSON.stringify(outputPCS)}`);
 }
 
-function decodePixel(format: number, source: Uint8Array | Float32Array, pixelIndex: number): Float32Array {
-  const stride = T_CHANNELS(format) + T_EXTRA(format);
+function getFormatComponentCount(format: number): number {
+  return T_CHANNELS(format) + T_EXTRA(format);
+}
+
+function getFormatPixelBytes(format: number): number {
+  return getFormatComponentCount(format) * cmsFormatterPixelSize(format);
+}
+
+function decodePixelAtByteOffset(format: number, source: Uint8Array | Float32Array, byteOffset: number): Float32Array {
+  const stride = getFormatComponentCount(format);
 
   if (_cmsFormatterIsFloat(format)) {
     if (!(source instanceof Float32Array)) {
       throw new Error("Float format requires Float32Array input");
     }
-    return unpackChunkyFloat32(format, source.subarray(pixelIndex * stride, (pixelIndex + 1) * stride));
+    const elementOffset = Math.floor(byteOffset / 4);
+    return unpackChunkyFloat32(format, source.subarray(elementOffset, elementOffset + stride));
   }
 
   if (!(source instanceof Uint8Array)) {
     throw new Error("Integer format requires Uint8Array input");
   }
 
-  const words = unpackChunky8To16(format, source.subarray(pixelIndex * stride, (pixelIndex + 1) * stride));
+  const words = unpackChunky8To16(format, source.subarray(byteOffset, byteOffset + stride));
   return Float32Array.from(words, (value) => value / 65535);
 }
 
-function copyAlpha(
+function copyAlphaAtByteOffset(
   inputFormat: number,
   outputFormat: number,
   source: Uint8Array | Float32Array,
   target: Uint8Array | Float32Array,
-  pixelIndex: number,
+  inputByteOffset: number,
+  outputByteOffset: number,
 ): void {
   const inputExtra = T_EXTRA(inputFormat);
   const outputExtra = T_EXTRA(outputFormat);
@@ -113,31 +124,45 @@ function copyAlpha(
     return;
   }
 
-  const inputStride = T_CHANNELS(inputFormat) + inputExtra;
-  const outputStride = T_CHANNELS(outputFormat) + outputExtra;
+  const inputStride = getFormatComponentCount(inputFormat);
+  const outputStride = getFormatComponentCount(outputFormat);
   const inputSwapFirst = ((inputFormat >> 14) & 1) !== 0;
   const outputSwapFirst = ((outputFormat >> 14) & 1) !== 0;
-  const sourceOffset = pixelIndex * inputStride + (inputSwapFirst ? 0 : T_CHANNELS(inputFormat));
-  const targetOffset = pixelIndex * outputStride + (outputSwapFirst ? 0 : T_CHANNELS(outputFormat));
+
+  if (_cmsFormatterIsFloat(inputFormat) || _cmsFormatterIsFloat(outputFormat)) {
+    if (!(source instanceof Float32Array) || !(target instanceof Float32Array)) {
+      throw new Error("Float alpha copy requires Float32Array buffers");
+    }
+
+    const sourceOffset = Math.floor(inputByteOffset / 4) + (inputSwapFirst ? 0 : T_CHANNELS(inputFormat));
+    const targetOffset = Math.floor(outputByteOffset / 4) + (outputSwapFirst ? 0 : T_CHANNELS(outputFormat));
+    for (let i = 0; i < inputExtra; i += 1) {
+      target[targetOffset + i] = source[sourceOffset + i] as never;
+    }
+    return;
+  }
+
+  const sourceOffset = inputByteOffset + (inputSwapFirst ? 0 : T_CHANNELS(inputFormat));
+  const targetOffset = outputByteOffset + (outputSwapFirst ? 0 : T_CHANNELS(outputFormat));
 
   for (let i = 0; i < inputExtra; i += 1) {
     target[targetOffset + i] = source[sourceOffset + i] as never;
   }
 }
 
-function encodePixel(
+function encodePixelAtByteOffset(
   format: number,
   target: Uint8Array | Float32Array,
-  pixelIndex: number,
+  byteOffset: number,
   values: readonly number[],
 ): void {
-  const stride = T_CHANNELS(format) + T_EXTRA(format);
+  const stride = getFormatComponentCount(format);
 
   if (_cmsFormatterIsFloat(format)) {
     if (!(target instanceof Float32Array)) {
       throw new Error("Float format requires Float32Array output");
     }
-    target.set(packChunkyFloat32(format, values), pixelIndex * stride);
+    target.set(packChunkyFloat32(format, values), Math.floor(byteOffset / 4));
     return;
   }
 
@@ -150,7 +175,7 @@ function encodePixel(
       format,
       values.map((value) => Math.round(clampUnit(value) * 65535)),
     ),
-    pixelIndex * stride,
+    byteOffset,
   );
 }
 
@@ -240,12 +265,66 @@ export function cmsDoTransform(
   size: number,
 ): void {
   for (let pixelIndex = 0; pixelIndex < size; pixelIndex += 1) {
-    const decoded = decodePixel(transform.inputFormat, inputBuffer, pixelIndex);
+    const inputByteOffset = pixelIndex * getFormatPixelBytes(transform.inputFormat);
+    const outputByteOffset = pixelIndex * getFormatPixelBytes(transform.outputFormat);
+    const decoded = decodePixelAtByteOffset(transform.inputFormat, inputBuffer, inputByteOffset);
     const output = evaluateTransformPixel(transform, decoded);
-    encodePixel(transform.outputFormat, outputBuffer, pixelIndex, output);
+    encodePixelAtByteOffset(transform.outputFormat, outputBuffer, outputByteOffset, output);
 
     if ((transform.flags & cmsFLAGS_COPY_ALPHA) !== 0) {
-      copyAlpha(transform.inputFormat, transform.outputFormat, inputBuffer, outputBuffer, pixelIndex);
+      copyAlphaAtByteOffset(transform.inputFormat, transform.outputFormat, inputBuffer, outputBuffer, inputByteOffset, outputByteOffset);
+    }
+  }
+}
+
+export function cmsDoTransformStride(
+  transform: CmsTransform,
+  inputBuffer: Uint8Array | Float32Array,
+  outputBuffer: Uint8Array | Float32Array,
+  size: number,
+  stride: number,
+): void {
+  cmsDoTransformLineStride(transform, inputBuffer, outputBuffer, size, 1, 0, 0, stride, stride);
+}
+
+export function cmsDoTransformLineStride(
+  transform: CmsTransform,
+  inputBuffer: Uint8Array | Float32Array,
+  outputBuffer: Uint8Array | Float32Array,
+  pixelsPerLine: number,
+  lineCount: number,
+  bytesPerLineIn: number,
+  bytesPerLineOut: number,
+  bytesPerPlaneIn: number,
+  bytesPerPlaneOut: number,
+): void {
+  const pixelStrideIn = bytesPerPlaneIn || getFormatPixelBytes(transform.inputFormat);
+  const pixelStrideOut = bytesPerPlaneOut || getFormatPixelBytes(transform.outputFormat);
+  const lineStrideIn = bytesPerLineIn || pixelsPerLine * pixelStrideIn;
+  const lineStrideOut = bytesPerLineOut || pixelsPerLine * pixelStrideOut;
+
+  for (let line = 0; line < lineCount; line += 1) {
+    const inputLineBase = line * lineStrideIn;
+    const outputLineBase = line * lineStrideOut;
+
+    for (let pixel = 0; pixel < pixelsPerLine; pixel += 1) {
+      const inputByteOffset = inputLineBase + pixel * pixelStrideIn;
+      const outputByteOffset = outputLineBase + pixel * pixelStrideOut;
+      const decoded = decodePixelAtByteOffset(transform.inputFormat, inputBuffer, inputByteOffset);
+      const output = evaluateTransformPixel(transform, decoded);
+
+      encodePixelAtByteOffset(transform.outputFormat, outputBuffer, outputByteOffset, output);
+
+      if ((transform.flags & cmsFLAGS_COPY_ALPHA) !== 0) {
+        copyAlphaAtByteOffset(
+          transform.inputFormat,
+          transform.outputFormat,
+          inputBuffer,
+          outputBuffer,
+          inputByteOffset,
+          outputByteOffset,
+        );
+      }
     }
   }
 }

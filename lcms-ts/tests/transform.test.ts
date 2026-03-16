@@ -9,6 +9,8 @@ import {
   cmsFLAGS_NULLTRANSFORM,
   cmsCreateTransform,
   cmsDoTransform,
+  cmsDoTransformLineStride,
+  cmsDoTransformStride,
 } from "../src/transform/index.js";
 import { cmsOpenProfileFromMem, type CmsProfile } from "../src/profile/profile.js";
 import { cmsGetPCS } from "../src/profile/profile.js";
@@ -112,5 +114,33 @@ describe("cmsxform bootstrap", () => {
     decodedOutput.forEach((value, index) => {
       expect(Math.abs(value - (decodedInput[index] ?? 0))).toBeLessThanOrEqual(4096);
     });
+  });
+
+  it("supports legacy stride walking for chunky buffers with gaps", () => {
+    const profile = createProfile(srgbPath);
+    const transform = cmsCreateTransform(profile, TYPE_ARGB_8, profile, TYPE_ARGB_8, 0, cmsFLAGS_NULLTRANSFORM | cmsFLAGS_COPY_ALPHA);
+    const input = Uint8Array.from([
+      0xaa, 0x10, 0x20, 0x30, 0, 0,
+      0xbb, 0x40, 0x50, 0x60, 0, 0,
+    ]);
+    const output = new Uint8Array(input.length);
+
+    cmsDoTransformStride(transform, input, output, 2, 6);
+
+    expect(Array.from(output)).toEqual(Array.from(input));
+  });
+
+  it("supports line stride walking for multi-line chunky buffers", () => {
+    const profile = createProfile(srgbPath);
+    const transform = cmsCreateTransform(profile, TYPE_ARGB_8, profile, TYPE_ARGB_8, 0, cmsFLAGS_NULLTRANSFORM | cmsFLAGS_COPY_ALPHA);
+    const input = Uint8Array.from([
+      0xaa, 0x10, 0x20, 0x30, 0xbb, 0x40, 0x50, 0x60, 0, 0, 0, 0,
+      0xcc, 0x70, 0x80, 0x90, 0xdd, 0xa0, 0xb0, 0xc0, 0, 0, 0, 0,
+    ]);
+    const output = new Uint8Array(input.length);
+
+    cmsDoTransformLineStride(transform, input, output, 2, 2, 12, 12, 4, 4);
+
+    expect(Array.from(output)).toEqual(Array.from(input));
   });
 });
